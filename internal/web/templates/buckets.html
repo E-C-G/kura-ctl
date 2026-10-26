@@ -21,7 +21,7 @@
       <td colspan="4">{{if .Err}}<span class="sev-haute">région illisible : {{.Err}}</span>{{else}}
         <form method="post" action="/buckets/import" class="inline">
           <input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="bucket" value="{{.Name}}">
-          <input name="client_code" required pattern="[a-z0-9][a-z0-9-]{0,19}" value="{{index $d.SuggestFor .Name}}" list="clients" aria-label="Code client" placeholder="acme">
+          <input name="client_code" required pattern="[a-z0-9][a-z0-9\-]{0,19}" value="{{index $d.SuggestFor .Name}}" list="clients" aria-label="Code client" placeholder="acme">
           <input name="client_name" placeholder="Nom du client" aria-label="Nom du client">
           <input name="poste" placeholder="SRV01" aria-label="Poste">
           <button>Importer</button>

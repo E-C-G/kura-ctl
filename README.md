@@ -156,6 +156,14 @@ go test -tags mattn ./...     # variante avec github.com/mattn/go-sqlite3 (CGO)
 go run ./cmd/kura-ctl --data ./tmp
 ```
 
+Essai dans un vrai navigateur (Chromium, avec Playwright installé), sur un compte
+Wasabi factice :
+
+```sh
+KURA_E2E=/tmp/kura-e2e go test -count=1 -run TestServeForBrowser ./internal/web/ &
+node scripts/e2e-browser.js /tmp/kura-e2e
+```
+
 Les binaires publiés sont compilés avec `CGO_ENABLED=0` pour Windows, macOS
 (arm64, amd64) et Linux.
 

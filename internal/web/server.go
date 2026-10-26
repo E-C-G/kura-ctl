@@ -182,16 +182,32 @@ func (s *Server) guard(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		// same-origin, pas no-referrer : avec no-referrer, le navigateur envoie
+		// « Origin: null » sur les formulaires, indiscernable d'une origine étrangère.
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
-				http.Error(w, "origine refusée", http.StatusForbidden)
-				return
-			}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
+			s.Log.Warn("requête d'une autre origine refusée", "chemin", r.URL.Path,
+				"origin", r.Header.Get("Origin"), "sec-fetch-site", r.Header.Get("Sec-Fetch-Site"))
+			http.Error(w, "origine refusée", http.StatusForbidden)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// sameOrigin : une requête qui modifie quelque chose doit venir des pages de la
+// console. Les navigateurs récents envoient Sec-Fetch-Site ; tous envoient Origin
+// sur un POST. Sans aucun des deux (client hors navigateur), le jeton CSRF et le
+// mot de passe restent exigés.
+func sameOrigin(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin":
+	default: // same-site (autre port de localhost…), cross-site, none
+		return false
+	}
+	o := r.Header.Get("Origin")
+	return o == "" || o == "http://"+r.Host
 }
 
 type ctxKey struct{}

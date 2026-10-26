@@ -218,10 +218,22 @@ func TestFullFlow(t *testing.T) {
 		t.Fatalf("import sans jeton CSRF : %d", rec.Code)
 	}
 	imp.Set("csrf", tok)
-	if rec := hn.do("POST", "/buckets/import", imp, map[string]string{"Origin": "http://evil.example"}); rec.Code != http.StatusForbidden {
-		t.Fatalf("import depuis une autre origine : %d", rec.Code)
+	for _, h := range []map[string]string{
+		{"Origin": "http://evil.example"},
+		{"Origin": "null"},
+		{"Sec-Fetch-Site": "same-site", "Origin": "http://localhost:8888"},
+		{"Sec-Fetch-Site": "cross-site"},
+	} {
+		if rec := hn.do("POST", "/buckets/import", imp, h); rec.Code != http.StatusForbidden {
+			t.Fatalf("import depuis une autre origine %v : %d", h, rec.Code)
+		}
 	}
-	expectRedirect(t, hn.do("POST", "/buckets/import", imp, nil), "/buckets/acme-srv01")
+	if rp := hn.do("GET", "/buckets", nil, nil).Header().Get("Referrer-Policy"); rp == "no-referrer" {
+		t.Fatal("no-referrer : les navigateurs enverraient « Origin: null » sur les formulaires")
+	}
+	// Comme un navigateur : Origin et Sec-Fetch-Site de la console elle-même.
+	browser := map[string]string{"Origin": "http://" + hn.host, "Sec-Fetch-Site": "same-origin"}
+	expectRedirect(t, hn.do("POST", "/buckets/import", imp, browser), "/buckets/acme-srv01")
 	// Double clic : pas d'erreur, renvoi vers le bucket.
 	expectRedirect(t, hn.do("POST", "/buckets/import", imp, nil), "/buckets/acme-srv01")
 	if rec := hn.do("GET", "/buckets/acme-srv01", nil, nil); !strings.Contains(rec.Body.String(), "Bucket importé") {
