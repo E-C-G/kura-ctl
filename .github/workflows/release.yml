@@ -68,15 +68,29 @@ jobs:
               tar -C pkg -czf "dist/$name.tar.gz" "$name"
             fi
           done
+          # Exécutable Windows seul aussi, téléchargeable sans décompresser.
+          cp "pkg/kura-ctl_${v}_windows_amd64/kura-ctl.exe" "dist/kura-ctl_${v}_windows_amd64.exe"
           out="$(./pkg/kura-ctl_${v}_linux_amd64/kura-ctl --version)"
           [[ "$out" == *"$v"* ]] || { echo "::error::version absente du binaire"; exit 1; }
           (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
 
+      # Publication : les erreurs de gh remontent en annotations (journal non lisible
+      # sans téléchargement). Relançable : une release déjà créée pour ce tag reçoit
+      # les fichiers (remplacés s'ils existent).
       - name: Publication
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          flags=(--verify-tag --generate-notes --title "kura-ctl ${{ steps.v.outputs.version }}")
-          [[ "${{ steps.v.outputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
-          gh release create "$TAG" "${flags[@]}" dist/*
-        shell: bash
+          set -o pipefail
+          report() { while IFS= read -r l; do echo "::error title=Publication::$l"; done < "$1"; }
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG déjà présente : envoi des fichiers."
+            gh release upload "$TAG" dist/* --clobber 2> err.txt || { report err.txt; exit 1; }
+          else
+            flags=(--verify-tag --generate-notes --title "kura-ctl ${{ steps.v.outputs.version }}")
+            if [[ "${{ steps.v.outputs.prerelease }}" == "true" ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" "${flags[@]}" dist/* 2> err.txt || { report err.txt; exit 1; }
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name'
