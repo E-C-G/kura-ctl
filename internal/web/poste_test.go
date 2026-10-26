@@ -12,9 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/E-C-G/kura-agent/pkg/pack"
 	"github.com/E-C-G/kura-ctl/internal/kit"
@@ -27,12 +29,16 @@ type fakeKit struct {
 	err   error
 	calls atomic.Int32
 	dir   string
+	gate  chan struct{} // non nil : Prepare attend sa fermeture
 }
 
-func (f *fakeKit) Prepare(context.Context) (kit.Components, error) {
+func (f *fakeKit) Prepare(context.Context) (kit.Components, func(), error) {
 	f.calls.Add(1)
+	if f.gate != nil {
+		<-f.gate
+	}
 	if f.err != nil {
-		return kit.Components{}, f.err
+		return kit.Components{}, nil, f.err
 	}
 	write := func(name, content string) string {
 		p := filepath.Join(f.dir, name)
@@ -42,7 +48,7 @@ func (f *fakeKit) Prepare(context.Context) (kit.Components, error) {
 		return p
 	}
 	return kit.Components{AgentVersion: "0.6.0", AgentExe: write("kura-agent.exe", "MZ agent"), AgentWExe: write("kura-agentw.exe", "MZ agentw"),
-		AgentSHA256: strings.Repeat("a", 64), MSI: write(kit.MSIName, "msi"), MSISHA256: strings.Repeat("b", 64)}, nil
+		AgentSHA256: strings.Repeat("a", 64), MSI: write(kit.MSIName, "msi"), MSISHA256: strings.Repeat("b", 64)}, func() {}, nil
 }
 
 var (
@@ -238,4 +244,39 @@ func (hn *harness) keyCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.akeys["kura-acme-srv01"])
+}
+
+func TestKitBusyAndTokenKinds(t *testing.T) {
+	hn, tok := adminHarness(t, nil)
+	fk := &fakeKit{t: t, dir: t.TempDir(), gate: make(chan struct{})}
+	hn.srv.Kit = fk
+	b, _ := hn.st.Bucket(context.Background(), "acme-srv01")
+	hn.savePoste(tok, poste.Template(b))
+	rec := hn.do("POST", "/buckets/acme-srv01/cles", installForm(hn, tok, map[string]string{"hc-url": "https://hc-ping.example/u"}), nil)
+	km, um := kitURLRe.FindStringSubmatch(rec.Body.String()), packURLRe.FindStringSubmatch(rec.Body.String())
+	res := make(chan int)
+	go func() { res <- hn.do("GET", km[1], nil, nil).Code }()
+	for fk.calls.Load() == 0 {
+		runtime.Gosched()
+	}
+	// Kit en préparation : ni .kura, ni second kit.
+	if c := hn.do("GET", um[1], nil, nil).Code; c != http.StatusConflict {
+		t.Fatalf(".kura pendant le kit : %d", c)
+	}
+	if c := hn.do("GET", km[1], nil, nil).Code; c != http.StatusConflict {
+		t.Fatalf("second kit : %d", c)
+	}
+	close(fk.gate)
+	if c := <-res; c != 200 {
+		t.Fatalf("kit : %d", c)
+	}
+	// Jeton expiré : refusé.
+	rec = hn.do("POST", "/buckets/acme-srv01/cles", installForm(hn, tok, map[string]string{"hc-url": "https://hc-ping.example/u"}), nil)
+	km = kitURLRe.FindStringSubmatch(rec.Body.String())
+	hn.advance(20 * time.Minute)
+	hn.do("GET", "/buckets/acme-srv01", nil, nil) // activité : la session reste ouverte
+	hn.advance(11 * time.Minute)
+	if c := hn.do("GET", km[1], nil, nil).Code; c != http.StatusGone {
+		t.Fatalf("kit expiré : %d", c)
+	}
 }

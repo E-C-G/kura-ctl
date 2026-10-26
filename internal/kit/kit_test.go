@@ -74,7 +74,7 @@ func newFake(t *testing.T, ver string) *fakeGitHub {
 
 func (g *fakeGitHub) source(dir string, now time.Time) *Source {
 	return &Source{HTTP: g.srv.Client(), ReleasesAPI: g.srv.URL + "/releases/latest", MSIURL: g.srv.URL + "/AWSCLIV2.msi",
-		CacheDir: dir, Now: func() time.Time { return now }}
+		AssetPrefix: g.srv.URL + "/dl/", CacheDir: dir, Now: func() time.Time { return now }}
 }
 
 func TestPrepareAndWrite(t *testing.T) {
@@ -82,16 +82,19 @@ func TestPrepareAndWrite(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 	src := g.source(dir, now)
-	c, err := src.Prepare(context.Background())
+	c, release, err := src.Prepare(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	release()
 	if c.AgentVersion != "0.6.0" || c.AgentSHA256 != sha256Hex([]byte("MZ agent")) || c.MSISHA256 != sha256Hex(g.msi) {
 		t.Fatalf("%+v", c)
 	}
 	// Deuxième préparation : tout vient du cache.
-	if _, err := src.Prepare(context.Background()); err != nil || g.zipCalls.Load() != 1 || g.msiCalls.Load() != 1 {
+	if _, release, err := src.Prepare(context.Background()); err != nil || g.zipCalls.Load() != 1 || g.msiCalls.Load() != 1 {
 		t.Fatalf("cache non utilisé : %v zip=%d msi=%d", err, g.zipCalls.Load(), g.msiCalls.Load())
+	} else {
+		release()
 	}
 
 	var out bytes.Buffer
@@ -130,14 +133,14 @@ func TestPrepareAndWrite(t *testing.T) {
 func TestPrepareRefusals(t *testing.T) {
 	t.Run("version trop ancienne", func(t *testing.T) {
 		g := newFake(t, "0.5.2")
-		if _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), MinAgent) {
+		if _, _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), MinAgent) {
 			t.Fatal(err)
 		}
 	})
 	t.Run("somme fausse", func(t *testing.T) {
 		g := newFake(t, "0.6.0")
 		g.sums = strings.Replace(g.sums, sha256Hex(g.zip), strings.Repeat("a", 64), 1)
-		if _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "SHA") {
+		if _, _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "SHA") {
 			t.Fatal(err)
 		}
 	})
@@ -145,14 +148,14 @@ func TestPrepareRefusals(t *testing.T) {
 		g := newFake(t, "0.6.0")
 		g.zip = agentZip(t, "0.6.0", map[string][]byte{"kura-agent.exe": []byte("MZ agent")})
 		g.sums = fmt.Sprintf("%s  kura-agent_0.6.0_windows_amd64.zip\n", sha256Hex(g.zip))
-		if _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil {
+		if _, _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil {
 			t.Fatal("accepté")
 		}
 	})
 	t.Run("pas un MSI", func(t *testing.T) {
 		g := newFake(t, "0.6.0")
 		g.msi = []byte("<html>erreur</html>")
-		if _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil {
+		if _, _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background()); err == nil {
 			t.Fatal("accepté")
 		}
 	})
@@ -162,17 +165,17 @@ func TestMSIRefreshAndOffline(t *testing.T) {
 	g := newFake(t, "0.6.0")
 	dir := t.TempDir()
 	now := time.Now()
-	if _, err := g.source(dir, now).Prepare(context.Background()); err != nil {
+	if _, _, err := g.source(dir, now).Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// Vieux de plus de 30 jours : retéléchargé.
 	later := now.Add(MSIMaxAge + time.Hour)
-	if _, err := g.source(dir, later).Prepare(context.Background()); err != nil || g.msiCalls.Load() != 2 {
+	if _, _, err := g.source(dir, later).Prepare(context.Background()); err != nil || g.msiCalls.Load() != 2 {
 		t.Fatalf("%v, %d appels", err, g.msiCalls.Load())
 	}
 	// AWS injoignable : le MSI en cache sert encore.
 	g.msiDown = true
-	c, err := g.source(dir, later.Add(MSIMaxAge+time.Hour)).Prepare(context.Background())
+	c, _, err := g.source(dir, later.Add(MSIMaxAge+time.Hour)).Prepare(context.Background())
 	if err != nil || c.MSI == "" {
 		t.Fatalf("hors ligne : %v", err)
 	}
@@ -190,4 +193,37 @@ func TestAtLeast(t *testing.T) {
 			t.Errorf("%q", c.v)
 		}
 	}
+}
+
+func TestAssetHostRestricted(t *testing.T) {
+	g := newFake(t, "0.6.0")
+	src := g.source(t.TempDir(), time.Now())
+	src.AssetPrefix = "https://github.com/E-C-G/kura-agent/releases/download/"
+	if _, _, err := src.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "adresse inattendue") {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareBlocksRefreshWhileWriting(t *testing.T) {
+	g := newFake(t, "0.6.0")
+	dir := t.TempDir()
+	src := g.source(dir, time.Now())
+	_, release, err := src.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		if _, r, err := src.Prepare(context.Background()); err == nil {
+			r()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("préparation pendant l'écriture d'un kit")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	<-done
 }

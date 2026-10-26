@@ -39,6 +39,8 @@ const (
 	MSIName = "AWSCLIV2.msi"
 	// MinAgent : première version de kura-agent qui installe depuis un paquet.
 	MinAgent = "0.6.0"
+	// AssetPrefix : seules adresses de téléchargement acceptées pour kura-agent.
+	AssetPrefix = "https://github.com/E-C-G/kura-agent/releases/download/"
 	// MSIMaxAge : au-delà, le MSI en cache est retéléchargé (versions récentes).
 	MSIMaxAge = 30 * 24 * time.Hour
 
@@ -55,15 +57,30 @@ type Source struct {
 	HTTP        *http.Client
 	ReleasesAPI string
 	MSIURL      string
+	AssetPrefix string
 	CacheDir    string
 	Now         func() time.Time
 
-	mu sync.Mutex // une préparation à la fois (fichiers du cache)
+	// mu : une préparation à la fois ; les kits en cours d'écriture tiennent un
+	// verrou en lecture, pour qu'aucune préparation ne remplace un fichier lu.
+	mu sync.RWMutex
 }
 
 // NewSource : source réelle, cache dans dir.
 func NewSource(dir string) *Source {
-	return &Source{HTTP: &http.Client{Timeout: 15 * time.Minute}, ReleasesAPI: ReleasesAPI, MSIURL: MSIURL, CacheDir: dir, Now: time.Now}
+	return &Source{HTTP: &http.Client{Timeout: 15 * time.Minute, CheckRedirect: httpsOnly}, ReleasesAPI: ReleasesAPI, MSIURL: MSIURL,
+		AssetPrefix: AssetPrefix, CacheDir: dir, Now: time.Now}
+}
+
+// httpsOnly refuse une redirection vers une adresse non HTTPS.
+func httpsOnly(r *http.Request, via []*http.Request) error {
+	if r.URL.Scheme != "https" {
+		return fmt.Errorf("redirection non HTTPS refusée : %s", r.URL)
+	}
+	if len(via) >= 10 {
+		return errors.New("trop de redirections")
+	}
+	return nil
 }
 
 // Components : fichiers prêts à mettre dans le kit.
@@ -85,10 +102,20 @@ type release struct {
 }
 
 // Prepare garantit la présence en cache de la dernière version de kura-agent et du
-// MSI de la CLI AWS.
-func (s *Source) Prepare(ctx context.Context) (Components, error) {
+// MSI de la CLI AWS. En cas de succès, release doit être appelé une fois le kit
+// écrit : jusque-là, les fichiers du cache ne sont pas remplacés.
+func (s *Source) Prepare(ctx context.Context) (c Components, release func(), err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	c, err = s.prepare(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		return Components{}, nil, err
+	}
+	s.mu.RLock()
+	return c, s.mu.RUnlock, nil
+}
+
+func (s *Source) prepare(ctx context.Context) (Components, error) {
 	if err := os.MkdirAll(s.CacheDir, 0o700); err != nil {
 		return Components{}, err
 	}
@@ -132,6 +159,11 @@ func (s *Source) agent(ctx context.Context) (Components, error) {
 	}
 	if urls[zipName] == "" || urls["SHA256SUMS"] == "" {
 		return Components{}, fmt.Errorf("release %s incomplète (%s et SHA256SUMS attendus)", rel.TagName, zipName)
+	}
+	for _, name := range []string{zipName, "SHA256SUMS"} {
+		if !strings.HasPrefix(urls[name], s.AssetPrefix) {
+			return Components{}, fmt.Errorf("%s : adresse inattendue %s", name, urls[name])
+		}
 	}
 	sums, err := s.get(ctx, urls["SHA256SUMS"], 64<<10)
 	if err != nil {

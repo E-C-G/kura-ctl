@@ -18,7 +18,9 @@ import (
 
 // KitSource fournit les composants du kit d'installation (kit.Source en production).
 type KitSource interface {
-	Prepare(ctx context.Context) (kit.Components, error)
+	// Prepare renvoie les composants ; release, appelé une fois le kit écrit, libère
+	// les fichiers du cache.
+	Prepare(ctx context.Context) (c kit.Components, release func(), err error)
 }
 
 // posteView : état de la configuration du poste, sur la page du bucket.
@@ -186,7 +188,7 @@ func (s *Server) downloadKit(w http.ResponseWriter, r *http.Request) {
 	}
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
-	c, err := s.Kit.Prepare(pctx)
+	c, done, err := s.Kit.Prepare(pctx)
 	if err != nil {
 		// Le paquet n'est pas consommé : le .kura seul reste téléchargeable.
 		release(false)
@@ -195,18 +197,31 @@ func (s *Server) downloadKit(w http.ResponseWriter, r *http.Request) {
 			"\nLe paquet .kura reste téléchargeable seul depuis la page précédente (la CLI AWS sera alors téléchargée par le poste).", http.StatusBadGateway)
 		return
 	}
-	release(true)
-	if err := s.Store.MarkKeyDownloaded(ctx, p.keyID); err != nil {
-		_ = s.Store.Audit(ctx, "paquet téléchargé", p.bucket, store.ResultError, "clé "+maskKey(p.keyID)+", état non enregistré : "+err.Error())
-	}
+	defer done()
 	now := s.now()
-	_ = s.Store.Audit(ctx, "kit d'installation téléchargé", p.bucket, store.ResultOK,
-		fmt.Sprintf("clé %s, kura-agent %s, CLI AWS %s", maskKey(p.keyID), c.AgentVersion, c.MSISHA256[:12]))
 	folder := "kura-" + b.Name
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+folder+"-"+now.Format("20060102")+`.zip"`)
 	if err := kit.Write(w, kit.Kit{Folder: folder, PackName: p.file, Pack: p.data, Readme: kitReadme(b, p, c, now),
 		Components: c, GeneratedAt: now}); err != nil {
+		// Envoi interrompu : le paquet reste téléchargeable.
+		release(false)
 		s.Log.Error("kit", "bucket", b.Name, "err", err)
+		_ = s.Store.Audit(ctx, "kit d'installation", p.bucket, store.ResultError, "envoi interrompu : "+err.Error())
+		return
 	}
+	// Envoyé en entier : le paquet est consommé.
+	release(true)
+	if err := s.Store.MarkKeyDownloaded(ctx, p.keyID); err != nil {
+		_ = s.Store.Audit(ctx, "paquet téléchargé", p.bucket, store.ResultError, "clé "+maskKey(p.keyID)+", état non enregistré : "+err.Error())
+	}
+	_ = s.Store.Audit(ctx, "kit d'installation téléchargé", p.bucket, store.ResultOK,
+		fmt.Sprintf("clé %s, kura-agent %s, CLI AWS %s", maskKey(p.keyID), c.AgentVersion, short(c.MSISHA256)))
+}
+
+func short(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }

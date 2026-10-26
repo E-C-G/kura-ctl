@@ -401,6 +401,11 @@ kit échoue sans consommer le paquet, qui reste téléchargeable seul (le poste 
 la CLI AWS) ; un MSI déjà en cache sert encore. La signature Authenticode du MSI (Amazon) est
 vérifiée par kura-agent sur le poste, avant installation.
 
+**Limite.** Les exécutables de kura-agent sont vérifiés contre le `SHA256SUMS` de la même release :
+cela protège d'un fichier corrompu, pas d'une release publiée par quelqu'un qui aurait pris la
+main sur le dépôt. Les adresses de téléchargement sont limitées aux releases de
+`E-C-G/kura-agent` ; signer les releases (clé publique intégrée à la console) fermerait ce point.
+
 Sur le poste, kit décompressé, dans une console d'administration :
 
 ```bat
