@@ -53,7 +53,10 @@
   <table>
     <thead><tr><th>Jour</th><th class="num">Facturé</th><th class="num">Données</th><th class="num">Supprimé facturé</th><th class="num">Objets</th><th class="num">Envoyé</th></tr></thead>
     <tbody>{{range $d.Recent}}<tr><td>{{.Day}}</td><td class="num">{{bytes .PaddedBytes}}</td><td class="num">{{bytes .ActiveBytes}}</td><td class="num">{{bytes .DeletedBytes}}</td><td class="num">{{.Objects}}</td><td class="num">{{bytes .UploadBytes}}</td></tr>
-    {{else}}<tr><td colspan="6" class="muted">Pas encore de statistique (collecte en cours, ou bucket créé aujourd'hui).</td></tr>{{end}}</tbody>
+    {{else}}<tr><td colspan="6" class="muted">{{if $d.CollectError}}<span class="sev-haute">Collecte en échec : {{$d.CollectError}}</span>
+      {{else if $d.CollectedAt.IsZero}}Collecte en cours.
+      {{else}}Wasabi n'a encore publié aucune journée pour ce bucket (collecte du {{datetime $d.CollectedAt}}). L'usage d'une journée est publié le lendemain, en heure UTC : un bucket rempli aujourd'hui apparaît demain.{{end}}</td></tr>{{end}}</tbody>
   </table>
+  {{if and $d.Recent $d.CollectError}}<p class="flash error">Dernière collecte en échec : {{$d.CollectError}}</p>{{end}}
 </section>
 {{end}}

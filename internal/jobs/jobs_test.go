@@ -192,3 +192,24 @@ func TestUnreadableSettingKeepsKnownDeviation(t *testing.T) {
 		t.Fatalf("alertes : %+v", ov.Alerts)
 	}
 }
+
+// Collecte en échec : visible sur le bucket et en alerte, effacée au succès suivant.
+func TestCollectErrorRecorded(t *testing.T) {
+	st, r, acc, now := setup(t)
+	ctx := context.Background()
+	acc.fail = errors.New("API Stats : accès refusé")
+	r.CollectBucket(ctx, "acme-srv01")
+	b, _ := st.Bucket(ctx, "acme-srv01")
+	if b.CollectError == "" || b.CollectedAt.IsZero() {
+		t.Fatalf("erreur de collecte non enregistrée : %+v", b)
+	}
+	ov, _ := BuildOverview(ctx, st, Pricing{PerTB: 7}, *now)
+	if !strings.Contains(ov.Alerts[0].Message, "collecte de l'usage en échec") {
+		t.Fatalf("alertes : %+v", ov.Alerts)
+	}
+	acc.fail = nil
+	r.CollectBucket(ctx, "acme-srv01")
+	if b, _ = st.Bucket(ctx, "acme-srv01"); b.CollectError != "" {
+		t.Fatalf("erreur non effacée : %q", b.CollectError)
+	}
+}

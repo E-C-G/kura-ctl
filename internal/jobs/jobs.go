@@ -162,7 +162,10 @@ func (r *Runner) CollectBucket(ctx context.Context, name string) (int, error) {
 	f, to := from.Format("2006-01-02"), today.Format("2006-01-02")
 	days, err := r.Account.BucketDaily(ctx, name, f, to)
 	if err != nil {
-		_ = r.Store.Audit(ctx, "collecte de l'usage", name, store.ResultError, err.Error())
+		if ctx.Err() == nil { // verrouillage en cours de collecte : pas une erreur
+			_ = r.Store.SaveCollect(ctx, name, err.Error())
+			_ = r.Store.Audit(ctx, "collecte de l'usage", name, store.ResultError, err.Error())
+		}
 		return 0, err
 	}
 	rows := make([]store.Usage, 0, len(days))
@@ -174,6 +177,7 @@ func (r *Runner) CollectBucket(ctx context.Context, name string) (int, error) {
 	if err := r.Store.UpsertUsage(ctx, rows); err != nil {
 		return 0, err
 	}
+	_ = r.Store.SaveCollect(ctx, name, "")
 	_ = r.Store.Audit(ctx, "collecte de l'usage", name, store.ResultOK, fmt.Sprintf("%d journée(s) du %s au %s", len(rows), f, to))
 	return len(rows), nil
 }

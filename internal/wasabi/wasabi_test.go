@@ -261,3 +261,16 @@ func TestKeepPrevious(t *testing.T) {
 		t.Fatalf("seconde reprise : %+v", next)
 	}
 }
+
+func TestObjectLockWithoutDefaultRetention(t *testing.T) {
+	d := Standard.Audit(Settings{Versioning: "Enabled", ObjectLock: ObjectLock{Enabled: true}})
+	for _, x := range d {
+		if x.Code == "object-lock-retention" {
+			if x.Severity != High {
+				t.Fatalf("gravité %s, attendu haute", x.Severity)
+			}
+			return
+		}
+	}
+	t.Fatalf("écart absent : %+v", d)
+}

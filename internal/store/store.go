@@ -104,6 +104,9 @@ var migrations = []string{
 		BEGIN SELECT RAISE(ABORT, 'journal d''audit en ajout seul'); END;
 	CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit
 		BEGIN SELECT RAISE(ABORT, 'journal d''audit en ajout seul'); END;`,
+	// 2 : résultat de la dernière collecte de l'usage, affiché sur la page du bucket.
+	`ALTER TABLE buckets ADD COLUMN collected_at TEXT;
+	ALTER TABLE buckets ADD COLUMN collect_error TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate() error {
@@ -258,6 +261,8 @@ type Bucket struct {
 	SettingsJSON   string    // réglages relevés (wasabi.Settings)
 	DeviationsJSON string    // écarts au modèle ([]wasabi.Deviation)
 	AuditError     string
+	CollectedAt    time.Time // zéro : jamais collecté
+	CollectError   string    // erreur de la dernière collecte ("" : réussie)
 }
 
 // ErrNotFound : bucket inconnu de la console.
@@ -271,13 +276,15 @@ func (s *Store) ImportBucket(ctx context.Context, b Bucket) error {
 }
 
 const bucketCols = `name, region, client_code, poste, imported_at, COALESCE(audited_at, ''),
-	COALESCE(settings_json, ''), COALESCE(deviations_json, ''), audit_error`
+	COALESCE(settings_json, ''), COALESCE(deviations_json, ''), audit_error,
+	COALESCE(collected_at, ''), collect_error`
 
 func scanBucket(sc interface{ Scan(...any) error }) (Bucket, error) {
 	var b Bucket
-	var imported, audited string
-	err := sc.Scan(&b.Name, &b.Region, &b.ClientCode, &b.Poste, &imported, &audited, &b.SettingsJSON, &b.DeviationsJSON, &b.AuditError)
-	b.ImportedAt, b.AuditedAt = parseTS(imported), parseTS(audited)
+	var imported, audited, collected string
+	err := sc.Scan(&b.Name, &b.Region, &b.ClientCode, &b.Poste, &imported, &audited, &b.SettingsJSON, &b.DeviationsJSON, &b.AuditError,
+		&collected, &b.CollectError)
+	b.ImportedAt, b.AuditedAt, b.CollectedAt = parseTS(imported), parseTS(audited), parseTS(collected)
 	return b, err
 }
 
@@ -306,6 +313,13 @@ func (s *Store) Bucket(ctx context.Context, name string) (Bucket, error) {
 		return Bucket{}, ErrNotFound
 	}
 	return b, err
+}
+
+// SaveCollect enregistre le résultat de la dernière collecte de l'usage.
+func (s *Store) SaveCollect(ctx context.Context, name, collectErr string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE buckets SET collected_at = ?, collect_error = ? WHERE name = ?`,
+		ts(s.now()), collectErr, name)
+	return err
 }
 
 // SaveBucketAudit enregistre le résultat d'un audit des réglages.

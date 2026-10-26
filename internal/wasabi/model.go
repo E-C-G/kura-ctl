@@ -95,6 +95,12 @@ func (t Template) Audit(s Settings) []Deviation {
 		case !s.ObjectLock.Enabled:
 			add("object-lock", High, FixNewBucket,
 				"pas d'Object Lock : une clé qui aurait le droit de supprimer des versions pourrait purger l'historique")
+		case s.ObjectLock.Mode == "":
+			// L'agent (aws s3 sync) ne pose pas de rétention sur ses envois : sans
+			// rétention par défaut, aucun objet n'est verrouillé.
+			add("object-lock-retention", High, FixAfter,
+				"Object Lock activé sans rétention par défaut : aucun objet n'est verrouillé (attendu %s)",
+				retention(t.ObjectLockMode, t.ObjectLockDays))
 		case s.ObjectLock.Mode != t.ObjectLockMode || s.ObjectLock.Days != t.ObjectLockDays:
 			add("object-lock-retention", Medium, FixAfter,
 				"rétention par défaut %s, attendu %s", retention(s.ObjectLock.Mode, s.ObjectLock.Days), retention(t.ObjectLockMode, t.ObjectLockDays))

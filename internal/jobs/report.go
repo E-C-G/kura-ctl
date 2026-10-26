@@ -106,6 +106,9 @@ func BuildOverview(ctx context.Context, st *store.Store, p Pricing, now time.Tim
 		if b.AuditError != "" && len(bs.Deviations) == 0 {
 			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.High, Bucket: b.Name, Message: "dernier relevé en échec : " + b.AuditError})
 		}
+		if b.CollectError != "" {
+			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.High, Bucket: b.Name, Message: "collecte de l'usage en échec : " + b.CollectError})
+		}
 		first, err := st.FirstUsageDay(ctx, b.Name)
 		if err != nil {
 			return ov, err
