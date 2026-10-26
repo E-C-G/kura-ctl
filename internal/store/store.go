@@ -125,6 +125,13 @@ var migrations = []string{
 		deleted_at      TEXT
 	);
 	CREATE INDEX access_keys_bucket ON access_keys(bucket);`,
+	// 4 : configuration du poste préparée dans la console (lot 3). Aucun secret : ils n'y
+	// figurent que par référence credential:<nom>.
+	`CREATE TABLE poste_configs (
+		bucket     TEXT PRIMARY KEY REFERENCES buckets(name),
+		yaml       TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
 }
 
 func (s *Store) migrate() error {
@@ -539,4 +546,30 @@ func (s *Store) SetKeyStatus(ctx context.Context, id, status string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// PosteConfig est la configuration du poste d'un bucket, préparée dans la console.
+type PosteConfig struct {
+	Bucket    string
+	YAML      string
+	UpdatedAt time.Time
+}
+
+// PosteConfig renvoie la configuration enregistrée (ErrNotFound : aucune).
+func (s *Store) PosteConfig(ctx context.Context, bucket string) (PosteConfig, error) {
+	var c PosteConfig
+	var at string
+	err := s.db.QueryRowContext(ctx, `SELECT bucket, yaml, updated_at FROM poste_configs WHERE bucket = ?`, bucket).Scan(&c.Bucket, &c.YAML, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return c, ErrNotFound
+	}
+	c.UpdatedAt = parseTS(at)
+	return c, err
+}
+
+// SavePosteConfig enregistre (ou remplace) la configuration du poste d'un bucket.
+func (s *Store) SavePosteConfig(ctx context.Context, bucket, yaml string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO poste_configs (bucket, yaml, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(bucket) DO UPDATE SET yaml = excluded.yaml, updated_at = excluded.updated_at`, bucket, yaml, ts(s.now()))
+	return err
 }

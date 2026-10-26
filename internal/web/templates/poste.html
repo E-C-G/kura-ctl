@@ -1,0 +1,20 @@
+{{define "content"}}{{$d := .Data}}
+<p><a href="/buckets/{{$d.Bucket.Name}}">← {{$d.Bucket.Name}}</a></p>
+<h1>Configuration du poste <span class="muted">· {{$d.Bucket.Name}}</span></h1>
+<p class="hint">Le <code>config.yaml</code> de kura-agent pour ce poste, vérifié avec le code même de l'agent. Il part dans le
+  paquet d'installation complète ; {{if $d.Saved}}enregistré le {{datetime $d.UpdatedAt}}{{else}}pas encore enregistré : modèle de départ ci-dessous, à adapter (sources, horaire, comptes){{end}}.</p>
+{{with $d.Err}}<pre class="flash error doc">{{.}}</pre>{{end}}
+<form method="post" action="/buckets/{{$d.Bucket.Name}}/poste" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>config.yaml<textarea name="yaml" class="yaml" spellcheck="false" required>{{$d.YAML}}</textarea></label>
+  <button>Vérifier et enregistrer</button>
+</form>
+<h2>Règles de la console</h2>
+<ul class="notes">
+  <li><code>profile.bucket</code>, <code>endpoint</code> et <code>region</code> : ceux de ce bucket.</li>
+  <li><code>profile.aws_credentials: credential:&lt;nom&gt;</code> : la clé du poste, créée par la console avec le paquet.</li>
+  <li>Aucun secret en clair : URL de ping et jetons en <code>credential:&lt;nom&gt;</code>, valeurs saisies à la création du paquet (jamais conservées par la console).</li>
+  <li><code>profile.aws_cli</code> vide (ou <code>C:/Program Files/Amazon/AWSCLIV2/aws.exe</code>) : la CLI AWS est installée par <code>kura-agent install</code> si elle manque.</li>
+  <li>Les sources et les comptes (<code>${PROFILE:…}</code>, <code>tray</code>) sont vérifiés sur le poste, à l'installation.</li>
+</ul>
+{{end}}

@@ -58,6 +58,7 @@ pre.doc { background: var(--panel); border: 1px solid var(--line); border-radius
 ul.notes { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 10px 10px 30px; }
 a.button { display: inline-block; padding: 8px 16px; border-radius: 6px; background: var(--accent); color: #fff; text-align: center; }
 a.button:hover { text-decoration: none; opacity: .9; }
+a.button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
 strong.password { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .05em; user-select: all; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .actions form { margin: 0; }
@@ -66,3 +67,5 @@ button.small { padding: 4px 10px; font-size: 13px; }
 button.danger { background: var(--crit); border-color: var(--crit); }
 label.check { display: flex; flex-direction: row; align-items: center; gap: .4rem; font-weight: normal; margin: .25rem 0; white-space: nowrap; }
 label.check input { width: auto; margin: 0; }
+textarea.yaml { display: block; width: 100%; min-height: 540px; margin-top: 4px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
+pre.flash.error { white-space: pre-wrap; }

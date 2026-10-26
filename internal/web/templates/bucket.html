@@ -59,7 +59,12 @@
   </table>
   {{end}}
 
-  <h2>Clés du poste</h2>
+  <h2>Configuration du poste</h2>
+  <p>{{if not $d.PosteCfg.Saved}}<span class="muted">Aucune configuration préparée dans la console.</span> <a href="/buckets/{{$d.Name}}/poste">Préparer la configuration du poste</a>
+    {{else if $d.PosteCfg.Err}}<span class="badge sev-haute">à corriger</span> enregistrée le {{date $d.PosteCfg.UpdatedAt}} · <a href="/buckets/{{$d.Name}}/poste">corriger</a>
+    {{else}}<span class="badge ok">prête</span> enregistrée le {{datetime $d.PosteCfg.UpdatedAt}} · {{len $d.PosteCfg.Checked.Config.Jobs}} job(s) · <a href="/buckets/{{$d.Name}}/poste">voir ou modifier</a>{{end}}</p>
+
+  <h2 id="cles">Clés du poste</h2>
   {{with $d.Keys.Error}}<p class="flash error">{{.}}</p>{{end}}
   {{if $d.Keys.Keys}}
   <table>
@@ -82,13 +87,35 @@
   </table>
   {{else}}<p class="muted">Aucune clé créée par la console pour ce poste.</p>{{end}}
   {{if $d.Keys.Admin.OK}}
-  <form method="post" action="/buckets/{{$d.Name}}/cles" autocomplete="off" class="narrow">
+  <section class="cols">
+  <form method="post" action="/buckets/{{$d.Name}}/cles" autocomplete="off">
     <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="once" value="{{$d.Keys.Once}}">
-    <p class="hint">Crée (si besoin) l'utilisateur <code>{{$d.Keys.UserName}}</code>, limité à ce bucket et sans droit de supprimer une version, puis une clé et son paquet « clé seule » à importer sur le poste avec <code>kura-agent import</code>.</p>
-    <label>Nom du secret sur le poste (<code>profile.aws_credentials: credential:…</code>)<input name="credential" value="wasabi" required pattern="[a-z0-9\-]{1,40}"></label>
+    <input type="hidden" name="paquet" value="installation">
+    <h3>Installation complète du poste</h3>
+    {{if and $d.PosteCfg.Saved (not $d.PosteCfg.Err)}}
+    <p class="hint">Crée (si besoin) l'utilisateur <code>{{$d.Keys.UserName}}</code>, limité à ce bucket et sans droit de supprimer une version, puis une clé et un paquet avec la <a href="/buckets/{{$d.Name}}/poste">configuration du poste</a> et ses secrets, remis dans un kit zip (kura-agent, CLI AWS) : sur le poste, <code>kura-agent install --package</code>.</p>
+    <p class="hint">Clé du poste : <code>credential:{{$d.PosteCfg.Checked.KeyName}}</code>.</p>
+    {{range $d.PosteCfg.Checked.Secrets}}
+    <label>{{.Name}} <span class="hint">({{.Field}}, non conservé par la console)</span><input type="password" name="secret-{{.Name}}" required autocomplete="new-password" spellcheck="false"></label>
+    {{end}}
     <label>Retaper le nom du bucket pour confirmer<input name="confirm" required autocomplete="off" spellcheck="false" placeholder="{{$d.Name}}"></label>
-    <button>Créer une clé et un paquet</button>
+    <button>Créer une clé et le kit d'installation</button>
+    {{else if $d.PosteCfg.Saved}}
+    <p class="flash error">Configuration du poste à corriger avant de créer un paquet d'installation : <a href="/buckets/{{$d.Name}}/poste">l'ouvrir</a>.</p>
+    {{else}}
+    <p class="hint">Pour installer un poste en une fois (configuration, clé, secrets, CLI AWS), <a href="/buckets/{{$d.Name}}/poste">préparer d'abord la configuration du poste</a>.</p>
+    {{end}}
   </form>
+  <form method="post" action="/buckets/{{$d.Name}}/cles" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="once" value="{{$d.Keys.Once}}">
+    <input type="hidden" name="paquet" value="cle">
+    <h3>Clé seule (poste déjà installé, rotation)</h3>
+    <p class="hint">Crée une clé et son paquet « clé seule » à importer sur le poste avec <code>kura-agent import</code> ; la configuration du poste ne change pas.</p>
+    <label>Nom du secret sur le poste (<code>profile.aws_credentials: credential:…</code>)<input name="credential" value="{{or $d.PosteCfg.Checked.KeyName "wasabi"}}" required pattern="[a-z0-9\-]{1,40}"></label>
+    <label>Retaper le nom du bucket pour confirmer<input name="confirm" required autocomplete="off" spellcheck="false" placeholder="{{$d.Name}}"></label>
+    <button class="ghost">Créer une clé et un paquet « clé seule »</button>
+  </form>
+  </section>
   {{end}}
 </section>
 

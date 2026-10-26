@@ -230,7 +230,7 @@ func TestKeyAlerts(t *testing.T) {
 	ov, _ = BuildOverview(ctx, st, Pricing{PerTB: 7}, time.Now().AddDate(0, 0, 91))
 	found = false
 	for _, a := range ov.Alerts {
-		found = found || strings.Contains(a.Message, "rotation due")
+		found = found || (strings.Contains(a.Message, "rotation due") && strings.HasSuffix(a.Link, "#cles"))
 	}
 	if !found {
 		t.Fatalf("alerte de rotation absente : %+v", ov.Alerts)

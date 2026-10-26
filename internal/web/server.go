@@ -56,6 +56,9 @@ type Server struct {
 	// PlainHost : servir sur 127.0.0.1 seulement, sans nom d'hôte aléatoire (navigateur
 	// qui ne résout pas les sous-domaines de localhost).
 	PlainHost bool
+	// Kit : composants du kit d'installation (kura-agent, CLI AWS) ; nil : kit
+	// indisponible, le paquet .kura reste téléchargeable seul.
+	Kit KitSource
 
 	mu         sync.Mutex
 	hosts      map[string]bool // valeurs admises de l'en-tête Host
@@ -131,7 +134,10 @@ func (o *unlocked) useOnce(t string) bool {
 type pendingPack struct {
 	bucket, keyID, file string
 	data                []byte
-	expires             time.Time
+	expires             time.Time // fin du téléchargement possible
+	validUntil          time.Time // fin de validité du paquet sur le poste
+	install             bool      // paquet d'installation complète : kit zip possible
+	busy                bool      // kit en préparation : ni second kit, ni .kura seul
 }
 
 // identity : utilisateur IAM de la clé d'administration (mis en cache ; un échec
@@ -243,6 +249,9 @@ func (s *Server) Handler() (http.Handler, error) {
 	app.HandleFunc("POST /buckets/{name}/cles", s.createKey)
 	app.HandleFunc("GET /buckets/{name}/paquet/{token}", s.downloadPack)
 	app.HandleFunc("POST /buckets/{name}/cles/{id}/{action}", s.keyAction)
+	app.HandleFunc("GET /buckets/{name}/poste", s.postePage)
+	app.HandleFunc("POST /buckets/{name}/poste", s.posteSubmit)
+	app.HandleFunc("GET /buckets/{name}/kit/{token}", s.downloadKit)
 	mux.Handle("/", s.requireSession(app))
 	return s.guard(mux), nil
 }

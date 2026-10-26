@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/E-C-G/kura-ctl/internal/kit"
 	"github.com/E-C-G/kura-ctl/internal/secrets"
 	"github.com/E-C-G/kura-ctl/internal/store"
 	"github.com/E-C-G/kura-ctl/internal/web"
@@ -83,7 +84,8 @@ func run() int {
 		return 0
 	}
 
-	srv := &web.Server{Store: st, Vault: vault, Log: log, Version: version, PlainHost: *plainHost}
+	srv := &web.Server{Store: st, Vault: vault, Log: log, Version: version, PlainHost: *plainHost,
+		Kit: kit.NewSource(filepath.Join(*dataDir, "kit"))}
 	ln, err := srv.Listen(*port)
 	if err != nil {
 		log.Error("écoute", "err", err)

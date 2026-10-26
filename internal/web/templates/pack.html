@@ -1,22 +1,40 @@
 {{define "content"}}{{$d := .Data}}
 <p><a href="/buckets/{{$d.Bucket.Name}}">← {{$d.Bucket.Name}}</a></p>
-<h1>Paquet « clé seule » <span class="muted">· {{$d.Bucket.Name}}</span></h1>
-<p>Clé <code>{{$d.KeyID}}</code> créée pour l'utilisateur <code>{{$d.UserName}}</code>, limitée au bucket <code>{{$d.Bucket.Name}}</code>.</p>
+<h1>{{if $d.Install}}Kit d'installation{{else}}Paquet « clé seule »{{end}} <span class="muted">· {{$d.Bucket.Name}}</span></h1>
+<p>Clé <code>{{$d.KeyID}}</code> créée pour l'utilisateur <code>{{$d.UserName}}</code>, limitée au bucket <code>{{$d.Bucket.Name}}</code>.
+{{if $d.Install}}Le paquet contient la configuration du poste, cette clé (<code>credential:{{$d.CredName}}</code>){{range $d.Others}}, <code>{{.}}</code>{{end}}.{{end}}</p>
 
 <section class="tiles">
   <div class="tile"><span>Mot de passe du paquet (affiché une seule fois)</span><strong class="password">{{$d.Password}}</strong>
     <em>À noter ou à copier maintenant : la console ne le conserve pas. Casse et tirets indifférents.</em></div>
+  {{if $d.Install}}
+  <div class="tile"><span>Kit complet (zip)</span>
+    <a class="button" href="{{$d.KitURL}}" hx-boost="false">Télécharger le kit</a>
+    <em>kura-agent (dernière version publiée), CLI AWS v2 et le paquet chiffré. Préparation à la première demande (téléchargements, puis cache) : patienter.
+      Téléchargeable une seule fois, dans les 30 minutes ; ouvrable sur le poste jusqu'au {{datetime $d.Expires}}.</em></div>
+  <div class="tile"><span>Ou le paquet seul</span>
+    <a class="button ghost" href="{{$d.URL}}" hx-boost="false" download="{{$d.File}}">Télécharger {{$d.File}}</a>
+    <em>À poser à côté de kura-agent.exe (zip de la release) ; le poste télécharge alors la CLI AWS si elle manque. Exclusif du kit : l'un ou l'autre, une seule fois.</em></div>
+  {{else}}
   <div class="tile"><span>Paquet chiffré</span>
     <a class="button" href="{{$d.URL}}" hx-boost="false" download="{{$d.File}}">Télécharger {{$d.File}}</a>
     <em>Téléchargeable une seule fois, dans les 30 minutes. Ouvrable sur le poste jusqu'au {{datetime $d.Expires}}.</em></div>
+  {{end}}
 </section>
 
 <h2>Sur le poste</h2>
 <ol>
+{{if $d.Install}}
+  <li>Copier le kit sur le poste et le décompresser (le mot de passe, lui, par un autre chemin).</li>
+  <li>Dans une invite de commandes <strong>en tant qu'administrateur</strong>, depuis le dossier du kit :<br>
+    <code>kura-agent.exe install --package {{$d.File}}</code><br>
+    <span class="hint">install demande le mot de passe, installe la CLI AWS si elle manque (signature Amazon vérifiée), range les secrets dans le coffre, vérifie l'accès au bucket, crée la tâche planifiée et l'icône, puis supprime le paquet.</span></li>
+{{else}}
   <li>Copier le fichier sur le poste (le mot de passe, lui, par un autre chemin).</li>
   <li>Dans une invite de commandes <strong>en tant qu'administrateur</strong> (kura-agent 0.5 ou plus récent) :<br>
     <code>kura-agent import C:\chemin\vers\{{$d.File}}</code><br>
     <span class="hint">L'import essaie la clé auprès de Wasabi avant de remplacer l'ancienne (secret <code>{{$d.CredName}}</code>), puis supprime le fichier.</span></li>
+{{end}}
   <li>Attendre la sauvegarde suivante (ou « Sauvegarder maintenant » depuis l'icône) et vérifier qu'elle réussit.</li>
   <li>Revenir sur la page du bucket et cliquer sur <strong>Confirmer l'installation</strong> : la console désactive alors les anciennes clés qu'elle a créées.</li>
 </ol>

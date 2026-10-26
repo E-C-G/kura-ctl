@@ -3,7 +3,7 @@ module github.com/E-C-G/kura-ctl
 go 1.26.0
 
 require (
-	github.com/E-C-G/kura-agent v0.4.4-0.20261026151310-f1ed14278a62
+	github.com/E-C-G/kura-agent v0.5.3-0.20261026210437-884b87104f7c
 	github.com/aws/aws-sdk-go-v2 v1.47.4
 	github.com/aws/aws-sdk-go-v2/service/iam v1.64.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5

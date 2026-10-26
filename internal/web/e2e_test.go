@@ -31,6 +31,7 @@ func TestServeForBrowser(t *testing.T) {
 		Store: st, Vault: &secrets.Vault{Keyring: &memKeyring{m: map[string]string{}}, Iterations: 1000},
 		NewAccount: func(k wasabi.Keys) Wasabi { return newFakeAccount(k) },
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Kit:        &fakeKit{t: t, dir: t.TempDir()},
 	}
 	ln, err := srv.Listen("0")
 	if err != nil {

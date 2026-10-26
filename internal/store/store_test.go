@@ -141,3 +141,25 @@ func TestAccessKeys(t *testing.T) {
 		t.Fatalf("clé inconnue : %v", err)
 	}
 }
+
+func TestPosteConfig(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	st.EnsureClient(ctx, Client{Code: "acme", Name: "Acme"})
+	st.ImportBucket(ctx, Bucket{Name: "acme-srv01", Region: "eu-central-1", ClientCode: "acme"})
+	if _, err := st.PosteConfig(ctx, "acme-srv01"); err != ErrNotFound {
+		t.Fatalf("aucune configuration : %v", err)
+	}
+	for _, y := range []string{"version: 1\n", "version: 1\n# v2\n"} {
+		if err := st.SavePosteConfig(ctx, "acme-srv01", y); err != nil {
+			t.Fatal(err)
+		}
+		c, err := st.PosteConfig(ctx, "acme-srv01")
+		if err != nil || c.YAML != y || c.UpdatedAt.IsZero() {
+			t.Fatalf("%+v %v", c, err)
+		}
+	}
+	if err := st.SavePosteConfig(ctx, "inconnu", "version: 1\n"); err == nil {
+		t.Fatal("configuration d'un bucket inconnu acceptée")
+	}
+}

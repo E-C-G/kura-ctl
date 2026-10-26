@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/E-C-G/kura-agent/pkg/pack"
+	"github.com/E-C-G/kura-ctl/internal/poste"
 	"github.com/E-C-G/kura-ctl/internal/secrets"
 	"github.com/E-C-G/kura-ctl/internal/store"
 	"github.com/E-C-G/kura-ctl/internal/wasabi"
@@ -435,6 +436,9 @@ type packView struct {
 	URL      string
 	File     string
 	Expires  time.Time
+	Install  bool     // paquet d'installation complète
+	KitURL   string   // kit zip (installation complète)
+	Others   []string // autres secrets du paquet
 }
 
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
@@ -462,7 +466,35 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	case !confirmed(r, b):
 		fail("Clé non créée : pour confirmer, retaper exactement le nom du bucket.")
 		return
-	case !credNamePattern.MatchString(credName):
+	}
+	// Paquet d'installation complète : configuration enregistrée, revérifiée, et
+	// secrets saisis maintenant (jamais conservés par la console). Tout est contrôlé
+	// avant de créer la clé chez Wasabi : un refus ne laisse pas de clé orpheline.
+	install := r.PostFormValue("paquet") == "installation"
+	var cfgYAML string
+	var others []pack.Credential
+	if install {
+		pc, err := s.Store.PosteConfig(ctx, b.Name)
+		if err != nil {
+			fail("Clé non créée : aucune configuration du poste enregistrée (« Préparer la configuration du poste »).")
+			return
+		}
+		chk, err := poste.Check(pc.YAML, b)
+		if err != nil {
+			fail("Clé non créée : configuration du poste à corriger. " + err.Error())
+			return
+		}
+		cfgYAML, credName = pc.YAML, chk.KeyName
+		for _, sec := range chk.Secrets {
+			v := strings.TrimSpace(r.PostFormValue("secret-" + sec.Name))
+			if err := poste.CheckSecret(sec, v); err != nil {
+				fail("Clé non créée : " + err.Error())
+				return
+			}
+			others = append(others, pack.Credential{Name: sec.Name, Kind: "secret", Value: v})
+		}
+	}
+	if !credNamePattern.MatchString(credName) {
 		fail("Nom du secret sur le poste invalide (minuscules, chiffres et tirets, 40 caractères au plus).")
 		return
 	}
@@ -519,16 +551,27 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	var data []byte
 	now := s.now()
 	if err == nil {
-		data, err = pack.Seal(pack.Contents{Kind: pack.KindCredentials, CreatedAt: now, ExpiresAt: now.Add(packValidFor),
+		c := pack.Contents{Kind: pack.KindCredentials, CreatedAt: now, ExpiresAt: now.Add(packValidFor),
 			Client: b.ClientCode, Host: b.Poste, Bucket: b.Name, Endpoint: wasabi.S3Endpoint(b.Region), Region: b.Region,
-			Credentials: []pack.Credential{{Name: credName, Kind: "aws", AccessKeyID: k.ID, SecretAccessKey: k.Secret}}}, pw, 0)
+			Credentials: append([]pack.Credential{{Name: credName, Kind: "aws", AccessKeyID: k.ID, SecretAccessKey: k.Secret}}, others...)}
+		if install {
+			c.Kind, c.Config = pack.KindInstall, cfgYAML
+		}
+		data, err = pack.Seal(c, pw, 0)
 	}
 	if err != nil {
 		audit(store.ResultError, "clé "+maskKey(k.ID)+" créée, paquet impossible : "+err.Error())
 		fail("Clé créée mais paquet impossible : " + err.Error() + ". Désactiver la clé et recommencer.")
 		return
 	}
-	detail := fmt.Sprintf("utilisateur %s, clé %s, paquet généré (secret %s)", user, maskKey(k.ID), credName)
+	detail := fmt.Sprintf("utilisateur %s, clé %s, paquet « clé seule » généré (secret %s)", user, maskKey(k.ID), credName)
+	if install {
+		names := []string{credName}
+		for _, c := range others {
+			names = append(names, c.Name)
+		}
+		detail = fmt.Sprintf("utilisateur %s, clé %s, paquet d'installation complète généré (secrets %s)", user, maskKey(k.ID), strings.Join(names, ", "))
+	}
 	if created {
 		detail = "utilisateur " + user + " créé ; " + detail
 	}
@@ -536,11 +579,18 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	token := randomToken()
 	file := fmt.Sprintf("%s-%s.kura", b.Name, now.Format("20060102"))
 	o.mu.Lock()
-	o.packs[token] = &pendingPack{bucket: b.Name, keyID: k.ID, file: file, data: data, expires: now.Add(packDownloadFor)}
+	o.packs[token] = &pendingPack{bucket: b.Name, keyID: k.ID, file: file, data: data, expires: now.Add(packDownloadFor),
+		validUntil: now.Add(packValidFor), install: install}
 	o.mu.Unlock()
-	s.render(w, r, "pack", view{Title: "Paquet de " + b.Name, Nav: "buckets", Data: packView{
-		Bucket: b, KeyID: k.ID, UserName: user, CredName: credName, Password: pw,
-		URL: "/buckets/" + b.Name + "/paquet/" + token, File: file, Expires: now.Add(packValidFor)}})
+	pv := packView{Bucket: b, KeyID: k.ID, UserName: user, CredName: credName, Password: pw,
+		URL: "/buckets/" + b.Name + "/paquet/" + token, File: file, Expires: now.Add(packValidFor), Install: install}
+	if install {
+		pv.KitURL = "/buckets/" + b.Name + "/kit/" + token
+		for _, c := range others {
+			pv.Others = append(pv.Others, c.Name)
+		}
+	}
+	s.render(w, r, "pack", view{Title: "Paquet de " + b.Name, Nav: "buckets", Data: pv})
 }
 
 func (s *Server) downloadPack(w http.ResponseWriter, r *http.Request) {
@@ -552,6 +602,11 @@ func (s *Server) downloadPack(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	o.mu.Lock()
 	p := o.packs[token]
+	if p != nil && p.busy {
+		o.mu.Unlock()
+		http.Error(w, "kit en cours de préparation avec ce paquet", http.StatusConflict)
+		return
+	}
 	delete(o.packs, token) // téléchargeable une seule fois
 	o.mu.Unlock()
 	if p == nil || p.bucket != r.PathValue("name") || s.now().After(p.expires) {

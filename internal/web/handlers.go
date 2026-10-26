@@ -403,10 +403,11 @@ func (s *Server) importBucket(w http.ResponseWriter, r *http.Request) {
 
 type bucketData struct {
 	jobs.BucketSummary
-	Recent  []store.Usage
-	Pricing jobs.Pricing
-	Keys    keysView
-	Fixes   map[string]bool // corrections utiles : strategie, cycle-de-vie, retention
+	Recent   []store.Usage
+	Pricing  jobs.Pricing
+	Keys     keysView
+	PosteCfg posteView
+	Fixes    map[string]bool // corrections utiles : strategie, cycle-de-vie, retention
 }
 
 func (s *Server) bucketPage(w http.ResponseWriter, r *http.Request) {
@@ -430,6 +431,7 @@ func (s *Server) bucketPage(w http.ResponseWriter, r *http.Request) {
 	}
 	d.Pricing = s.pricing(ctx)
 	d.Keys = s.keysFor(ctx, s.current(), d.Bucket)
+	d.PosteCfg = s.posteFor(ctx, d.Bucket)
 	d.Fixes = map[string]bool{}
 	for _, dev := range d.Deviations {
 		for what, codes := range fixedCodes {

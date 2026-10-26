@@ -46,6 +46,8 @@ type Alert struct {
 	Severity string
 	Bucket   string
 	Message  string
+	Link     string // action proposée (facultative)
+	LinkText string
 }
 
 // Overview est la vue d'ensemble.
@@ -177,10 +179,12 @@ func BuildOverview(ctx context.Context, st *store.Store, p Pricing, now time.Tim
 		switch {
 		case k.Status == store.KeyIssued && now.Sub(k.CreatedAt) > KeyConfirmAfter:
 			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.Medium, Bucket: k.Bucket, Message: fmt.Sprintf(
-				"clé %s remise le %s, installation jamais confirmée (à confirmer, ou à désactiver si le paquet est perdu)", k.ID, k.CreatedAt.Format("2006-01-02"))})
+				"clé %s remise le %s, installation jamais confirmée (à confirmer, ou à désactiver si le paquet est perdu)", k.ID, k.CreatedAt.Format("2006-01-02")),
+				Link: "/buckets/" + k.Bucket + "#cles", LinkText: "clés du poste"})
 		case k.Status == store.KeyInstalled && now.Sub(k.CreatedAt) > KeyRotateAfter:
 			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.Medium, Bucket: k.Bucket, Message: fmt.Sprintf(
-				"clé %s créée le %s : rotation due (plus de %d jours)", k.ID, k.CreatedAt.Format("2006-01-02"), int(KeyRotateAfter.Hours()/24))})
+				"clé %s créée le %s : rotation due (plus de %d jours)", k.ID, k.CreatedAt.Format("2006-01-02"), int(KeyRotateAfter.Hours()/24)),
+				Link: "/buckets/" + k.Bucket + "#cles", LinkText: "créer la clé suivante (paquet « clé seule »)"})
 		}
 	}
 	var billed, real float64

@@ -9,7 +9,7 @@
 {{with $d.Alerts}}
 <section class="alerts">
   <h2>Alertes</h2>
-  <ul>{{range .}}<li class="{{sevclass .Severity}}"><span class="badge {{sevclass .Severity}}">{{.Severity}}</span> <a href="/buckets/{{.Bucket}}">{{.Bucket}}</a> : {{.Message}}</li>{{end}}</ul>
+  <ul>{{range .}}<li class="{{sevclass .Severity}}"><span class="badge {{sevclass .Severity}}">{{.Severity}}</span> <a href="/buckets/{{.Bucket}}">{{.Bucket}}</a> : {{.Message}}{{if .Link}} · <a href="{{.Link}}">{{.LinkText}}</a>{{end}}</li>{{end}}</ul>
 </section>
 {{end}}
 

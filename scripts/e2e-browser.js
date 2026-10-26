@@ -66,6 +66,27 @@ const f = process.argv[2];
     console.log('14. stratégie réappliquée', (await page.textContent('body')).includes('appliqué et vérifié par relecture'));
     await page.screenshot({ path: f + '-bucket.png', fullPage: true });
     fs.writeFileSync(f + '.pw', pw);
+    // Lot 3 : configuration du poste, paquet d'installation complète, kit zip.
+    await page.goto(base + 'buckets/acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Préparer la configuration du poste')]);
+    const yaml = await page.inputValue('textarea[name=yaml]');
+    console.log('15. modèle de configuration', yaml.includes('bucket: acme-srv01') && yaml.includes('credential:hc-url'));
+    await page.fill('textarea[name=yaml]', yaml.replace('url: credential:hc-url', 'url: https://hc-ping.com/en-clair'));
+    await Promise.all([page.waitForNavigation(), page.click('text=Vérifier et enregistrer')]);
+    console.log('16. URL en clair refusée', (await page.textContent('body')).includes('notify.report.url'));
+    await page.fill('textarea[name=yaml]', yaml);
+    await Promise.all([page.waitForNavigation(), page.click('text=Vérifier et enregistrer')]);
+    console.log('17. configuration enregistrée', (await page.textContent('body')).includes('Configuration du poste enregistrée'));
+    await page.fill('input[name=secret-hc-url]', 'https://hc-ping.example/uuid-e2e');
+    await page.fill('form:has(input[name=secret-hc-url]) input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Créer une clé et le kit')]);
+    const pw2 = (await page.textContent('strong.password')).trim();
+    console.log('18. page du kit', /^[A-Z0-9]{4}(-[A-Z0-9]{4}){4}$/.test(pw2), (await page.textContent('body')).includes('install --package'));
+    await page.screenshot({ path: f + '-kit.png', fullPage: true });
+    const [kdl] = await Promise.all([page.waitForEvent('download'), page.click('text=Télécharger le kit')]);
+    await kdl.saveAs(f + '.zip');
+    const head = fs.readFileSync(f + '.zip').subarray(0, 2).toString();
+    console.log('19. kit téléchargé', kdl.suggestedFilename(), head === 'PK');
   } catch (e) {
     console.log('ÉCHEC', e.message, page.url());
     console.log((await page.textContent('body')).slice(0, 400));
