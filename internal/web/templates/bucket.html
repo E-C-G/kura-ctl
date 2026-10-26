@@ -72,7 +72,7 @@
         {{else}}supprimée le {{date .DeletedAt}}{{end}}</td>
       <td>{{or .Live "—"}}</td><td>{{if .LastUsed.IsZero}}<span class="muted">jamais</span>{{else}}{{datetime .LastUsed}}{{end}}</td><td>{{date .CreatedAt}}</td>
       <td><div class="actions">
-        {{if eq .Status "remise"}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/installee"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="small">Confirmer l'installation</button></form>{{end}}
+        {{if eq .Status "remise"}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/installee" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><label class="check"><input type="checkbox" name="verifie"> vérifié sur le poste</label><button class="small" title="Désactive les clés créées avant celle-ci, une fois que Wasabi l'a vue servir">Confirmer l'installation</button></form>{{end}}
         {{if or (eq .Status "remise") (eq .Status "installee")}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/desactiver" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><button class="small danger">Désactiver</button></form>{{end}}
         {{if eq .Status "desactivee"}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/reactiver" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><button class="small ghost">Réactiver</button></form>
           {{if .CanDelete}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/supprimer" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><button class="small danger">Supprimer</button></form>
@@ -83,9 +83,9 @@
   {{else}}<p class="muted">Aucune clé créée par la console pour ce poste.</p>{{end}}
   {{if $d.Keys.Admin.OK}}
   <form method="post" action="/buckets/{{$d.Name}}/cles" autocomplete="off" class="narrow">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="once" value="{{$d.Keys.Once}}">
     <p class="hint">Crée (si besoin) l'utilisateur <code>{{$d.Keys.UserName}}</code>, limité à ce bucket et sans droit de supprimer une version, puis une clé et son paquet « clé seule » à importer sur le poste avec <code>kura-agent import</code>.</p>
-    <label>Nom du secret sur le poste (<code>profile.aws_credentials: credential:…</code>)<input name="credential" value="wasabi" required pattern="[A-Za-z0-9._\-]{1,40}"></label>
+    <label>Nom du secret sur le poste (<code>profile.aws_credentials: credential:…</code>)<input name="credential" value="wasabi" required pattern="[a-z0-9\-]{1,40}"></label>
     <label>Retaper le nom du bucket pour confirmer<input name="confirm" required autocomplete="off" spellcheck="false" placeholder="{{$d.Name}}"></label>
     <button>Créer une clé et un paquet</button>
   </form>

@@ -182,9 +182,10 @@ type Policy struct {
 	Present               bool `json:"present"`
 	DenyInsecureTransport bool `json:"deny_insecure_transport,omitempty"`
 	DenyVersionDeletion   bool `json:"deny_version_deletion,omitempty"`
-	// Exceptions : principaux exclus du refus de suppression de versions.
-	Exceptions []string `json:"exceptions,omitempty"`
-	Document   string   `json:"document,omitempty"` // texte de la stratégie, pour l'aperçu
+	// DeniedTo : à qui la suppression de versions est refusée : "*" (à tous) ou les
+	// ARN des utilisateurs nommés.
+	DeniedTo []string `json:"denied_to,omitempty"`
+	Document string   `json:"document,omitempty"` // texte de la stratégie, pour l'aperçu
 }
 
 // ReadSettings relève les réglages d'un bucket. Un réglage illisible n'arrête pas
@@ -297,6 +298,7 @@ func summarizePolicy(doc string) Policy {
 	}
 	type statement struct {
 		Effect    string                    `json:"Effect"`
+		Principal json.RawMessage           `json:"Principal"`
 		Action    json.RawMessage           `json:"Action"`
 		Condition map[string]map[string]any `json:"Condition"`
 	}
@@ -323,53 +325,32 @@ func summarizePolicy(doc string) Policy {
 			}
 		}
 		// Un refus conditionnel (HTTP seulement, adresse IP…) laisse la suppression
-		// possible hors de la condition : il ne compte pas, sauf s'il ne fait
-		// qu'excepter des principaux nommés (la console, le compte racine).
-		except, onlyExceptions := principalExceptions(s.Condition)
-		if len(s.Condition) > 0 && !onlyExceptions {
+		// possible hors de la condition : il ne compte pas.
+		if len(s.Condition) > 0 {
 			continue
 		}
 		for _, a := range actions(s.Action) {
 			switch strings.ToLower(a) {
 			case "s3:deleteobjectversion", "s3:*", "s3:delete*", "*":
 				p.DenyVersionDeletion = true
-				p.Exceptions = append(p.Exceptions, except...)
+				p.DeniedTo = append(p.DeniedTo, principals(s.Principal)...)
 			}
 		}
 	}
 	return p
 }
 
-// principalExceptions : la condition ne porte que sur aws:PrincipalArn, avec un
-// opérateur négatif (refus à tous sauf ces principaux).
-func principalExceptions(cond map[string]map[string]any) ([]string, bool) {
-	if len(cond) == 0 {
-		return nil, false
+// principals : "*" ou les ARN AWS d'un élément Principal.
+func principals(raw json.RawMessage) []string {
+	var star string
+	if json.Unmarshal(raw, &star) == nil {
+		return []string{star}
 	}
-	var out []string
-	for op, kv := range cond {
-		switch strings.ToLower(op) {
-		case "stringnotequals", "stringnotlike", "arnnotequals", "arnnotlike":
-		default:
-			return nil, false
-		}
-		for k, v := range kv {
-			if !strings.EqualFold(k, "aws:PrincipalArn") {
-				return nil, false
-			}
-			switch x := v.(type) {
-			case string:
-				out = append(out, x)
-			case []any:
-				for _, e := range x {
-					if s, ok := e.(string); ok {
-						out = append(out, s)
-					}
-				}
-			}
-		}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
 	}
-	return out, true
+	return actions(m["AWS"])
 }
 
 // isFalse : "false", false ou ["false"].

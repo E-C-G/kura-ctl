@@ -68,6 +68,7 @@ type Server struct {
 	pages      map[string]*template.Template
 	attempt    sync.Mutex  // un seul essai de mot de passe à la fois
 	configured atomic.Bool // coffre présent (évite de lire le trousseau à chaque requête)
+	bucketMu   sync.Map    // nom du bucket → *sync.Mutex (écritures IAM une à la fois)
 }
 
 type session struct {
@@ -96,6 +97,33 @@ type unlocked struct {
 	idErr error
 	idAt  time.Time
 	packs map[string]*pendingPack // paquets .kura à télécharger, par jeton
+	once  map[string]time.Time    // jetons de formulaire à usage unique
+}
+
+// newOnce crée un jeton de formulaire à usage unique (valable 1 h).
+func (o *unlocked) newOnce() string {
+	t := randomToken()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.once == nil {
+		o.once = map[string]time.Time{}
+	}
+	for k, at := range o.once {
+		if time.Since(at) > time.Hour {
+			delete(o.once, k)
+		}
+	}
+	o.once[t] = time.Now()
+	return t
+}
+
+// useOnce consomme un jeton : vrai la première fois seulement.
+func (o *unlocked) useOnce(t string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	at, ok := o.once[t]
+	delete(o.once, t)
+	return ok && t != "" && time.Since(at) <= time.Hour
 }
 
 // pendingPack est un paquet généré, téléchargeable une fois tant que la console
@@ -159,6 +187,12 @@ func (s *Server) Listen(port string) (net.Listener, error) {
 		s.url = "http://" + host + "/"
 	}
 	return ln, nil
+}
+
+// bucketLock : verrou des écritures sur les clés d'un bucket.
+func (s *Server) bucketLock(name string) *sync.Mutex {
+	m, _ := s.bucketMu.LoadOrStore(name, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }
 
 // URL renvoie l'adresse de la console (après Listen).

@@ -478,7 +478,8 @@ func (s *Store) Keys(ctx context.Context, bucket string) ([]AccessKey, error) {
 		q += ` WHERE bucket = ?`
 		args = append(args, bucket)
 	}
-	rows, err := s.db.QueryContext(ctx, q+` ORDER BY created_at DESC, id`, args...)
+	// rowid : ordre de création exact, même pour deux clés créées dans la même seconde.
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY created_at DESC, rowid DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

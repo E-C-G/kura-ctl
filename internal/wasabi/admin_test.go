@@ -75,6 +75,8 @@ type fakeIAM struct {
 	users    map[string]bool
 	policies map[string]string // utilisateur/nom → document
 	keys     map[string][]AccessKey
+	attached map[string]string // utilisateur → stratégie attachée
+	groups   map[string]string // utilisateur → groupe
 	n        int
 }
 
@@ -146,6 +148,35 @@ func (f *fakeIAM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.keys[user] = ks
 		reply("")
+	case "ListUserPolicies":
+		var b strings.Builder
+		for k := range f.policies {
+			if u, name, _ := strings.Cut(k, "/"); u == user {
+				fmt.Fprintf(&b, `<member>%s</member>`, name)
+			}
+		}
+		reply(`<PolicyNames>` + b.String() + `</PolicyNames><IsTruncated>false</IsTruncated>`)
+	case "GetUserPolicy":
+		doc, ok := f.policies[user+"/"+r.Form.Get("PolicyName")]
+		if !ok {
+			fail(404, "NoSuchEntity")
+			return
+		}
+		// IAM renvoie le document encodé en URL.
+		reply(fmt.Sprintf(`<UserName>%s</UserName><PolicyName>%s</PolicyName><PolicyDocument>%s</PolicyDocument>`,
+			user, r.Form.Get("PolicyName"), url.QueryEscape(doc)))
+	case "ListAttachedUserPolicies":
+		b := ""
+		if n := f.attached[user]; n != "" {
+			b = fmt.Sprintf(`<member><PolicyName>%s</PolicyName><PolicyArn>arn:aws:iam::aws:policy/%s</PolicyArn></member>`, n, n)
+		}
+		reply(`<AttachedPolicies>` + b + `</AttachedPolicies><IsTruncated>false</IsTruncated>`)
+	case "ListGroupsForUser":
+		b := ""
+		if g := f.groups[user]; g != "" {
+			b = fmt.Sprintf(`<member><Path>/</Path><GroupName>%s</GroupName><GroupId>G</GroupId><Arn>arn:aws:iam::100000000042:group/%s</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate></member>`, g, g)
+		}
+		reply(`<Groups>` + b + `</Groups><IsTruncated>false</IsTruncated>`)
 	case "GetAccessKeyLastUsed":
 		reply(`<UserName>x</UserName><AccessKeyLastUsed><LastUsedDate>2026-10-26T12:00:00Z</LastUsedDate><ServiceName>s3</ServiceName><Region>eu-central-1</Region></AccessKeyLastUsed>`)
 	default:
@@ -156,7 +187,8 @@ func (f *fakeIAM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func adminClient(t *testing.T) (*Client, *writableS3, *fakeIAM) {
 	t.Helper()
 	s := &writableS3{region: "eu-central-1", objLock: true, docs: map[string]string{}, md5ok: map[string]bool{}}
-	i := &fakeIAM{self: "kura-ctl-admin", users: map[string]bool{"kura-ctl-admin": true}, policies: map[string]string{}, keys: map[string][]AccessKey{}}
+	i := &fakeIAM{self: "kura-ctl-admin", users: map[string]bool{"kura-ctl-admin": true}, policies: map[string]string{}, keys: map[string][]AccessKey{},
+		attached: map[string]string{}, groups: map[string]string{}}
 	ss, is := httptest.NewServer(s), httptest.NewServer(i)
 	t.Cleanup(ss.Close)
 	t.Cleanup(is.Close)
@@ -173,7 +205,7 @@ func TestApplyTemplateThenAuditIsClean(t *testing.T) {
 	if err != nil || id.AccountID != "100000000042" || id.UserName != "kura-ctl-admin" || id.Root() {
 		t.Fatalf("identité : %+v %v", id, err)
 	}
-	doc, err := BucketPolicy(Standard, "acme-srv01", id)
+	doc, err := BucketPolicy(Standard, "acme-srv01", id.AccountID, []string{"kura-acme-srv01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +227,11 @@ func TestApplyTemplateThenAuditIsClean(t *testing.T) {
 	if d := Standard.Audit(st); len(d) != 0 {
 		t.Fatalf("écarts après application du modèle : %+v\nstratégie : %s\ncycle de vie : %s", d, s.docs["policy"], s.docs["lifecycle"])
 	}
-	if !strings.Contains(strings.Join(st.Policy.Exceptions, " "), "user/kura-ctl-admin") {
-		t.Fatalf("exceptions : %v", st.Policy.Exceptions)
+	if got := st.Policy.DeniedTo; len(got) != 1 || got[0] != "arn:aws:iam::100000000042:user/kura-acme-srv01" {
+		t.Fatalf("refus : %v", got)
+	}
+	if u := st.Uncovered([]string{"kura-acme-srv01", "kura-autre"}); len(u) != 1 || u[0] != "kura-autre" {
+		t.Fatalf("utilisateurs non couverts : %v", u)
 	}
 	// Bucket sans Object Lock : la rétention par défaut est refusée par Wasabi.
 	s.objLock = false
@@ -206,7 +241,7 @@ func TestApplyTemplateThenAuditIsClean(t *testing.T) {
 }
 
 func TestBucketPolicyShape(t *testing.T) {
-	doc, err := BucketPolicy(Standard, "acme-srv01", Identity{AccountID: "100000000042", UserName: "kura-ctl-admin"})
+	doc, err := BucketPolicy(Standard, "acme-srv01", "100000000042", []string{"kura-acme-srv01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,23 +249,50 @@ func TestBucketPolicyShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(doc), &d); err != nil {
 		t.Fatal(err)
 	}
+	// Jamais de refus « à tous sauf » par condition sur l'identité : une clé de
+	// condition absente chez Wasabi rendrait le refus applicable à tous.
 	for _, st := range d.Statement {
-		for _, a := range st.Action {
-			if a == "s3:PutBucketPolicy" || a == "s3:DeleteBucketPolicy" {
-				t.Fatal("la console ne doit jamais pouvoir s'interdire de corriger la stratégie")
+		if strings.Contains(fmt.Sprint(st.Condition), "Principal") {
+			t.Fatalf("condition sur l'identité : %+v", st)
+		}
+		if st.Sid == "PostesSansSuppression" {
+			if st.Condition != nil || !strings.Contains(fmt.Sprint(st.Principal), "arn:aws:iam::100000000042:user/kura-acme-srv01") {
+				t.Fatalf("refus des postes : %+v", st)
 			}
+			continue
+		}
+		// Seule la règle HTTPS vise tout le monde, et seulement en HTTP.
+		if st.Sid != "HTTPSObligatoire" || st.Condition["Bool"]["aws:SecureTransport"] != "false" {
+			t.Fatalf("refus à tous : %+v", st)
 		}
 	}
-	if !strings.Contains(doc, `"arn:aws:iam::100000000042:root"`) || !strings.Contains(doc, `"arn:aws:iam::100000000042:user/kura-ctl-admin"`) {
-		t.Fatalf("exceptions absentes :\n%s", doc)
+	if strings.Contains(doc, "kura-ctl") || strings.Contains(doc, ":root") {
+		t.Fatalf("la console ou le compte racine visés :\n%s", doc)
 	}
-	if _, err := BucketPolicy(Standard, "b", Identity{AccountID: "1"}); err == nil {
-		t.Fatal("stratégie sans utilisateur de console")
+	// Sans utilisateur de poste : HTTPS seulement.
+	doc, _ = BucketPolicy(Standard, "acme-srv01", "100000000042", nil)
+	if strings.Contains(doc, "DeleteObjectVersion") {
+		t.Fatalf("refus sans utilisateur :\n%s", doc)
 	}
-	// Un refus qui excepte d'autres conditions (adresse IP) ne vaut pas protection.
-	p := summarizePolicy(`{"Statement":[{"Effect":"Deny","Action":"s3:DeleteObjectVersion","Condition":{"NotIpAddress":{"aws:SourceIp":"1.2.3.4/32"}}}]}`)
-	if p.DenyVersionDeletion {
-		t.Fatal("refus conditionné par IP compté comme protection")
+	for _, bad := range [][]string{{"kura-ctl-admin"}, {"alice"}} {
+		if _, err := BucketPolicy(Standard, "b", "1", bad); err == nil {
+			t.Fatalf("utilisateur %v accepté", bad)
+		}
+	}
+	if _, err := BucketPolicy(Standard, "b", "", nil); err == nil {
+		t.Fatal("stratégie sans numéro de compte")
+	}
+	// Un refus conditionnel (adresse IP, exceptions par aws:PrincipalArn) ne vaut pas protection.
+	for _, doc := range []string{
+		`{"Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:DeleteObjectVersion","Condition":{"NotIpAddress":{"aws:SourceIp":"1.2.3.4/32"}}}]}`,
+		`{"Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:DeleteObjectVersion","Condition":{"StringNotLike":{"aws:PrincipalArn":"*"}}}]}`,
+	} {
+		if summarizePolicy(doc).DenyVersionDeletion {
+			t.Fatalf("refus conditionnel compté comme protection : %s", doc)
+		}
+	}
+	if p := summarizePolicy(`{"Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:DeleteObjectVersion","Resource":"*"}]}`); len(p.DeniedTo) != 1 || p.DeniedTo[0] != "*" {
+		t.Fatalf("refus à tous : %+v", p)
 	}
 }
 
@@ -251,17 +313,58 @@ func TestPosteAndAdminPolicies(t *testing.T) {
 	if !strings.Contains(a, `"arn:aws:iam::*:user/kura-ctl*"`) {
 		t.Error("la console peut agir sur son propre utilisateur")
 	}
-	for _, c := range []struct{ client, poste, bucket, want string }{
-		{"acme", "SRV01", "acme-srv01", "kura-acme-srv01"},
-		{"poste", "Dell XPS", "poste-x", "kura-poste-dell-xps"},
-		{"acme", "", "acme-srv01", "kura-acme-srv01"},
-	} {
-		if got, err := UserNameFor(c.client, c.poste, c.bucket); err != nil || got != c.want {
-			t.Errorf("%v : %q %v", c, got, err)
+	for _, forbidden := range []string{"CreateBucket", "PutBucketVersioning", "Tagging", "ListUsers"} {
+		if strings.Contains(a, forbidden) {
+			t.Errorf("droit inutilisé dans la stratégie de la console : %s", forbidden)
 		}
 	}
-	if _, err := UserNameFor("ctl", "admin", "x"); err == nil {
-		t.Error("nom kura-ctl… accepté")
+	// Un bucket = un utilisateur : des buckets différents ne donnent jamais le même nom.
+	seen := map[string]string{}
+	for _, b := range []string{"acme-srv01", "acme-srv01-archive", "a-b-c", "a.b-c", "poste-x"} {
+		u, err := UserNameFor(b)
+		if err != nil || u != "kura-"+b {
+			t.Errorf("%s : %q %v", b, u, err)
+		}
+		if prev, ok := seen[u]; ok {
+			t.Errorf("%s et %s donnent %s", prev, b, u)
+		}
+		seen[u] = b
+	}
+	for _, bad := range []string{"ctl-admin", strings.Repeat("a", 60), "Acme", ""} {
+		if u, err := UserNameFor(bad); err == nil {
+			t.Errorf("%q accepté : %s", bad, u)
+		}
+	}
+}
+
+// Un utilisateur kura-* existant n'est repris que s'il ne sert qu'à ce bucket.
+func TestCheckPosteUser(t *testing.T) {
+	c, _, i := adminClient(t)
+	ctx := context.Background()
+	c.EnsureUser(ctx, "kura-acme-srv01")
+	if err := c.CheckPosteUser(ctx, "kura-acme-srv01", "acme-srv01"); err != nil {
+		t.Fatalf("utilisateur neuf : %v", err)
+	}
+	c.PutUserPolicy(ctx, "kura-acme-srv01", PosteUserPolicy, PostePolicy("acme-srv01"))
+	if err := c.CheckPosteUser(ctx, "kura-acme-srv01", "acme-srv01"); err != nil {
+		t.Fatalf("utilisateur de ce bucket : %v", err)
+	}
+	if err := c.CheckPosteUser(ctx, "kura-acme-srv01", "autre"); err == nil || !strings.Contains(err.Error(), "acme-srv01") {
+		t.Fatalf("utilisateur d'un autre bucket repris : %v", err)
+	}
+	for name, set := range map[string]func(){
+		"stratégie en ligne": func() {
+			i.policies["kura-acme-srv01/admin"] = `{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`
+		},
+		"stratégie attachée": func() { i.attached["kura-acme-srv01"] = "AdministratorAccess" },
+		"groupe":             func() { i.groups["kura-acme-srv01"] = "admins" },
+	} {
+		i.policies = map[string]string{"kura-acme-srv01/" + PosteUserPolicy: PostePolicy("acme-srv01")}
+		i.attached, i.groups = map[string]string{}, map[string]string{}
+		set()
+		if err := c.CheckPosteUser(ctx, "kura-acme-srv01", "acme-srv01"); err == nil {
+			t.Errorf("%s : utilisateur repris", name)
+		}
 	}
 }
 

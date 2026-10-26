@@ -125,6 +125,22 @@ func (r *Runner) AuditBucket(ctx context.Context, name, region string) error {
 		}
 	}
 	dev := r.Template.Audit(s)
+	// Utilisateurs des postes de ce bucket que la stratégie ne nomme pas (clé créée
+	// après la dernière application de la stratégie).
+	if keys, err := r.Store.Keys(ctx, name); err == nil {
+		seen := map[string]bool{}
+		var users []string
+		for _, k := range keys {
+			if k.Status != store.KeyDeleted && !seen[k.UserName] {
+				seen[k.UserName] = true
+				users = append(users, k.UserName)
+			}
+		}
+		for _, u := range s.Uncovered(users) {
+			dev = append(dev, wasabi.Deviation{Code: "strategie-postes", Severity: wasabi.High, Fix: wasabi.FixAfter,
+				Message: "la stratégie de bucket ne refuse pas la suppression de versions à " + u + " : la réappliquer"})
+		}
+	}
 	sj, _ := json.Marshal(s)
 	dj, _ := json.Marshal(dev)
 	errText := ""

@@ -7,6 +7,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +30,7 @@ const (
 	// KeyGrace : délai entre la désactivation d'une clé et sa suppression possible.
 	KeyGrace = 7 * 24 * time.Hour
 	// PosteUserPolicy : nom de la stratégie en ligne des utilisateurs de poste.
-	PosteUserPolicy = "kura-acces-bucket"
+	PosteUserPolicy = wasabi.PosteUserPolicy
 )
 
 // adminState dit si la clé de la console permet les écritures du lot 2.
@@ -63,6 +65,9 @@ type fixView struct {
 	Proposed string
 	Notes    []string
 	Blocked  string // correction impossible (et pourquoi)
+	Seen     string // empreinte de l'état montré : l'écriture est refusée s'il a changé
+	field    string // réglage relu après l'écriture (policy, lifecycle, object_lock)
+	users    []string
 }
 
 func pretty(doc string) string {
@@ -103,6 +108,30 @@ func templateLifecycle(t wasabi.Template) string {
 		ExpiredDeleteMarker: t.ExpiredDeleteMarker, AbortMultipartDays: t.AbortMultipartDays})
 }
 
+var modeFR = map[string]string{"GOVERNANCE": "gouvernance", "COMPLIANCE": "conformité"}
+
+// posteUsers : utilisateurs des postes de ce bucket, créés par la console.
+func (s *Server) posteUsers(ctx context.Context, bucket string) ([]string, error) {
+	keys, err := s.Store.Keys(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var users []string
+	for _, k := range keys {
+		if k.Status != store.KeyDeleted && !seen[k.UserName] {
+			seen[k.UserName] = true
+			users = append(users, k.UserName)
+		}
+	}
+	return users, nil
+}
+
+func fingerprint(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
+
 func retentionText(o wasabi.ObjectLock) string {
 	if !o.Enabled {
 		return "Object Lock désactivé"
@@ -110,23 +139,29 @@ func retentionText(o wasabi.ObjectLock) string {
 	if o.Mode == "" {
 		return "aucune rétention par défaut : rien n'est verrouillé"
 	}
-	return fmt.Sprintf("%s, %d jours", map[string]string{"GOVERNANCE": "gouvernance", "COMPLIANCE": "conformité"}[o.Mode], o.Days)
+	return fmt.Sprintf("%s, %d jours", modeFR[o.Mode], o.Days)
 }
 
-// fixFor prépare l'aperçu d'une correction. err : correction inconnue.
+// fixFor prépare l'aperçu d'une correction, d'après les réglages relus chez Wasabi à
+// l'instant (pas le dernier relevé : quelqu'un a pu les changer depuis).
+// err : correction inconnue.
 func (s *Server) fixFor(ctx context.Context, o *unlocked, b store.Bucket, what string) (fixView, error) {
 	v := fixView{Bucket: b, What: what}
-	var st wasabi.Settings
-	if b.SettingsJSON != "" {
-		_ = json.Unmarshal([]byte(b.SettingsJSON), &st)
+	if _, ok := fixedCodes[what]; !ok {
+		return v, errors.New("correction inconnue")
 	}
-	if b.AuditedAt.IsZero() {
-		v.Blocked = "réglages pas encore relevés : cliquer sur « Relever les réglages » d'abord"
+	if o == nil {
+		v.Blocked = "console verrouillée"
+		return v, nil
 	}
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	st := o.account.ReadSettings(lctx, b.Name, b.Region)
+	cancel()
 	t := wasabi.Standard
 	switch what {
 	case "strategie":
 		v.Title = "Stratégie de bucket"
+		v.field = "policy"
 		v.Current = "(aucune)"
 		if st.Policy.Document != "" {
 			v.Current = pretty(st.Policy.Document)
@@ -139,20 +174,34 @@ func (s *Server) fixFor(ctx context.Context, o *unlocked, b store.Bucket, what s
 			v.Blocked = adm.Reason
 			break
 		}
-		doc, err := wasabi.BucketPolicy(t, b.Name, adm.Identity)
+		users, err := s.posteUsers(ctx, b.Name)
+		if err != nil {
+			v.Blocked = err.Error()
+			break
+		}
+		v.users = users
+		doc, err := wasabi.BucketPolicy(t, b.Name, adm.Identity.AccountID, users)
 		if err != nil {
 			v.Blocked = err.Error()
 			break
 		}
 		v.Proposed = doc
 		v.Notes = []string{
-			"La stratégie actuelle est remplacée en entier : vérifier qu'elle ne contient rien d'autre à garder.",
-			"Refus du HTTP non chiffré, et refus à tous sauf " + adm.Identity.UserName + " et au compte racine de : " +
-				strings.Join(wasabi.ProtectedActions, ", ") + ".",
-			"La modification de la stratégie elle-même n'est jamais refusée : la console peut toujours la corriger.",
+			"La stratégie actuelle est remplacée en entier : vérifier qu'elle ne contient rien d'autre à garder (elle est conservée dans le journal d'audit).",
+			"Refus du HTTP non chiffré, pour tous.",
 		}
+		if len(users) == 0 {
+			v.Notes = append(v.Notes, "Aucun utilisateur de poste créé par la console pour ce bucket : seule la règle HTTPS est posée. "+
+				"Créer la clé du poste (page du bucket), puis réappliquer la stratégie pour refuser la suppression de versions à son utilisateur.")
+		} else {
+			v.Notes = append(v.Notes, "Refusé à "+strings.Join(users, ", ")+" : "+strings.Join(wasabi.ProtectedActions, ", ")+".")
+		}
+		v.Notes = append(v.Notes,
+			"Ni la console ni le compte racine ne sont visés : la stratégie ne peut pas les enfermer hors du bucket.",
+			"Une clé de poste créée à la main dans Wasabi n'est pas concernée : la remplacer par une clé créée ici.")
 	case "cycle-de-vie":
 		v.Title = "Cycle de vie"
+		v.field = "lifecycle"
 		v.Current = lifecycleLines(st.Lifecycle)
 		v.Proposed = templateLifecycle(t)
 		if _, unread := st.ReadErrors["lifecycle"]; unread {
@@ -164,18 +213,23 @@ func (s *Server) fixFor(ctx context.Context, o *unlocked, b store.Bucket, what s
 		}
 	case "retention":
 		v.Title = "Rétention par défaut (Object Lock)"
+		v.field = "object_lock"
 		v.Current = retentionText(st.ObjectLock)
-		v.Proposed = fmt.Sprintf("gouvernance, %d jours", t.ObjectLockDays)
-		if !st.ObjectLock.Enabled {
+		v.Proposed = fmt.Sprintf("%s, %d jours", modeFR[t.ObjectLockMode], t.ObjectLockDays)
+		if _, unread := st.ReadErrors["object_lock"]; unread {
+			v.Blocked = "Object Lock illisible : impossible de montrer ce qui serait remplacé"
+		} else if !st.ObjectLock.Enabled {
 			v.Blocked = "Object Lock n'est pas activé sur ce bucket : il ne s'active qu'à la création (bucket neuf, lot 4)"
 		}
-		v.Notes = []string{
-			"S'applique aux objets envoyés ensuite ; les objets déjà présents restent sans verrou.",
-			"Mode gouvernance : aucun poste ne peut effacer une version verrouillée ; seul le compte racine peut lever le verrou.",
+		v.Notes = []string{"S'applique aux objets envoyés ensuite ; les objets déjà présents restent sans verrou."}
+		if t.ObjectLockMode == "COMPLIANCE" {
+			v.Notes = append(v.Notes, "Mode conformité : personne, pas même le compte racine, ne pourra effacer une version avant la fin de sa rétention. Irréversible pour chaque objet envoyé.")
+		} else {
+			v.Notes = append(v.Notes, "Mode gouvernance : une clé de poste ne peut pas effacer une version verrouillée ; "+
+				"un utilisateur qui a le droit s3:BypassGovernanceRetention (le compte racine, un administrateur) le peut.")
 		}
-	default:
-		return v, errors.New("correction inconnue")
 	}
+	v.Seen = fingerprint(v.Current + "\x00" + v.Proposed)
 	return v, nil
 }
 
@@ -195,7 +249,7 @@ func (s *Server) fixPreview(w http.ResponseWriter, r *http.Request) {
 
 // fixedCodes : écarts que chaque correction doit faire disparaître.
 var fixedCodes = map[string][]string{
-	"strategie":    {"strategie", "strategie-versions", "strategie-https"},
+	"strategie":    {"strategie", "strategie-versions", "strategie-https", "strategie-postes"},
 	"cycle-de-vie": {"cycle-versions", "cycle-versions-duree", "cycle-marqueurs", "cycle-multipart", "cycle-partiel", "cycle-courantes"},
 	"retention":    {"object-lock-retention"},
 }
@@ -232,6 +286,10 @@ func (s *Server) fixApply(w http.ResponseWriter, r *http.Request) {
 		again("Pour confirmer, retaper exactement le nom du bucket.")
 		return
 	}
+	if r.PostFormValue("seen") != v.Seen {
+		again("Le réglage a changé chez Wasabi depuis l'aperçu : vérifier l'aperçu ci-dessus, à jour, puis confirmer à nouveau.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(o.ctx, time.Minute)
 	defer cancel()
 	t := wasabi.Standard
@@ -247,37 +305,62 @@ func (s *Server) fixApply(w http.ResponseWriter, r *http.Request) {
 		action = "rétention par défaut appliquée"
 		err = o.account.PutDefaultRetention(ctx, b.Name, b.Region, t.ObjectLockMode, t.ObjectLockDays)
 	}
+	before := "avant : " + strings.Join(strings.Fields(v.Current), " ")
 	if err != nil {
-		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultError, err.Error())
+		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultError, err.Error()+" ; "+before)
 		again("Wasabi a refusé : " + err.Error())
 		return
 	}
 	// Relecture : la correction n'est réussie que si Wasabi montre le nouveau réglage.
-	_ = o.runner.AuditBucket(ctx, b.Name, b.Region)
+	note := ""
+	if err := o.runner.AuditBucket(ctx, b.Name, b.Region); err != nil {
+		note = "relecture incomplète (" + err.Error() + ")"
+	}
 	after, _ := s.Store.Bucket(r.Context(), b.Name)
+	var st wasabi.Settings
+	_ = json.Unmarshal([]byte(after.SettingsJSON), &st)
+	if _, unread := st.ReadErrors[v.field]; unread && note == "" {
+		note = "réglage illisible à la relecture"
+	}
 	var devs []wasabi.Deviation
 	_ = json.Unmarshal([]byte(after.DeviationsJSON), &devs)
 	var left []string
 	for _, d := range devs {
+		// Sans utilisateur de poste, la stratégie ne peut pas encore refuser la
+		// suppression de versions : écart attendu, expliqué dans l'aperçu.
+		if what == "strategie" && len(v.users) == 0 && d.Code == "strategie-versions" {
+			continue
+		}
 		for _, c := range fixedCodes[what] {
 			if d.Code == c {
 				left = append(left, d.Message)
 			}
 		}
 	}
-	if len(left) > 0 {
-		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultError, "écrit, mais la relecture montre encore : "+strings.Join(left, " ; "))
+	switch {
+	case note != "":
+		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultError, "écrit, non vérifié : "+note+" ; "+before)
+		s.flash(r, "Écrit chez Wasabi, mais non vérifié : "+note+". Cliquer sur « Relever les réglages » pour contrôler.")
+	case len(left) > 0:
+		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultError, "écrit, mais la relecture montre encore : "+strings.Join(left, " ; ")+" ; "+before)
 		s.flash(r, "Écrit chez Wasabi, mais la relecture montre encore : "+strings.Join(left, " ; "))
-	} else {
-		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultOK, "modèle "+t.Name+", vérifié par relecture")
-		s.flash(r, v.Title+" : appliqué et vérifié par relecture.")
+	default:
+		_ = s.Store.Audit(r.Context(), action, b.Name, store.ResultOK, "modèle "+t.Name+", vérifié par relecture ; "+before)
+		msg := v.Title + " : appliqué et vérifié par relecture."
+		if what == "strategie" && len(v.users) == 0 {
+			msg += " Seule la règle HTTPS est posée : réappliquer après la création de la clé du poste."
+		}
+		s.flash(r, msg)
 	}
 	redirect(w, r, "/buckets/"+b.Name)
 }
 
 // --- clés des postes ---------------------------------------------------------------
 
-var credNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,40}$`)
+// credNamePattern : le motif des noms de secret du coffre de l'agent
+// (kura-agent pkg/pack.CredentialName) ; un nom refusé à l'import laisserait chez
+// Wasabi une clé active sans usage.
+var credNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
 type keyView struct {
 	store.AccessKey
@@ -292,11 +375,15 @@ type keysView struct {
 	UserName string
 	Keys     []keyView
 	Error    string
+	Once     string // jeton à usage unique du formulaire de création de clé
 }
 
 func (s *Server) keysFor(ctx context.Context, o *unlocked, b store.Bucket) keysView {
 	kv := keysView{Admin: s.adminState(ctx, o)}
-	kv.UserName, _ = wasabi.UserNameFor(b.ClientCode, b.Poste, b.Name)
+	kv.UserName, _ = wasabi.UserNameFor(b.Name)
+	if o != nil {
+		kv.Once = o.newOnce()
+	}
 	rows, err := s.Store.Keys(ctx, b.Name)
 	if err != nil {
 		kv.Error = err.Error()
@@ -376,10 +463,22 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		fail("Clé non créée : pour confirmer, retaper exactement le nom du bucket.")
 		return
 	case !credNamePattern.MatchString(credName):
-		fail("Nom du secret sur le poste invalide (lettres, chiffres, . _ -).")
+		fail("Nom du secret sur le poste invalide (minuscules, chiffres et tirets, 40 caractères au plus).")
 		return
 	}
-	user, err := wasabi.UserNameFor(b.ClientCode, b.Poste, b.Name)
+	// Une seule création à la fois par bucket, et un formulaire ne sert qu'une fois :
+	// un double clic ne crée pas deux clés.
+	lock := s.bucketLock(b.Name)
+	if !lock.TryLock() {
+		fail("Création de clé déjà en cours pour ce bucket.")
+		return
+	}
+	defer lock.Unlock()
+	if !o.useOnce(r.PostFormValue("once")) {
+		fail("Formulaire déjà envoyé : aucune nouvelle clé créée. Recharger la page pour en créer une autre.")
+		return
+	}
+	user, err := wasabi.UserNameFor(b.Name)
 	if err != nil {
 		fail(err.Error())
 		return
@@ -388,6 +487,10 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	audit := func(result, detail string) { _ = s.Store.Audit(ctx, "clé de poste créée", b.Name, result, detail) }
 	created, err := o.account.EnsureUser(wctx, user)
+	if err == nil && !created {
+		// Utilisateur déjà là : il ne doit servir qu'à ce bucket, sans autre droit.
+		err = o.account.CheckPosteUser(wctx, user, b.Name)
+	}
 	if err == nil {
 		err = o.account.PutUserPolicy(wctx, user, PosteUserPolicy, wasabi.PostePolicy(b.Name))
 	}
@@ -455,8 +558,11 @@ func (s *Server) downloadPack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "paquet déjà téléchargé ou expiré : en générer un nouveau (et désactiver la clé de celui-ci)", http.StatusGone)
 		return
 	}
-	_ = s.Store.MarkKeyDownloaded(r.Context(), p.keyID)
-	_ = s.Store.Audit(r.Context(), "paquet téléchargé", p.bucket, store.ResultOK, "clé "+maskKey(p.keyID))
+	if err := s.Store.MarkKeyDownloaded(r.Context(), p.keyID); err != nil {
+		_ = s.Store.Audit(r.Context(), "paquet téléchargé", p.bucket, store.ResultError, "clé "+maskKey(p.keyID)+", état non enregistré : "+err.Error())
+	} else {
+		_ = s.Store.Audit(r.Context(), "paquet téléchargé", p.bucket, store.ResultOK, "clé "+maskKey(p.keyID))
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+p.file+`"`)
 	_, _ = w.Write(p.data)
@@ -488,7 +594,7 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := r.PathValue("action")
-	if action != "installee" && !confirmed(r, b) {
+	if !confirmed(r, b) {
 		done("Rien n'a été fait : pour confirmer, retaper exactement le nom du bucket.")
 		return
 	}
@@ -503,13 +609,37 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 			done("Cette clé n'est pas en attente de confirmation.")
 			return
 		}
-		_ = s.Store.SetKeyStatus(ctx, k.ID, store.KeyInstalled)
-		audit("installation de la clé confirmée", store.ResultOK, "")
-		// La nouvelle clé fonctionne : les précédentes clés du poste sont désactivées.
+		// Preuve que le poste s'en sert : Wasabi a vu la clé travailler. Sans elle,
+		// désactiver les autres clés arrêterait la sauvegarde.
+		lastUsed, err := o.account.AccessKeyLastUsed(wctx, k.ID)
+		switch {
+		case err != nil && r.PostFormValue("verifie") != "on":
+			done("Wasabi ne dit pas si la clé a servi (" + err.Error() + ") : vérifier sur le poste qu'une sauvegarde a réussi avec elle, puis cocher « vérifié sur le poste » et confirmer.")
+			return
+		case err == nil && lastUsed.IsZero():
+			done("Cette clé n'a encore jamais servi : lancer une sauvegarde sur le poste (icône Kura → Sauvegarder maintenant), puis confirmer. Rien n'a été désactivé.")
+			return
+		}
+		if err := s.Store.SetKeyStatus(ctx, k.ID, store.KeyInstalled); err != nil {
+			done("Installation non enregistrée : " + err.Error())
+			return
+		}
+		proof := "utilisée chez Wasabi le " + dateTimeFR(lastUsed)
+		if lastUsed.IsZero() {
+			proof = "sauvegarde vérifiée sur le poste (utilisation non disponible chez Wasabi)"
+		}
+		audit("installation de la clé confirmée", store.ResultOK, " : "+proof)
+		// Les clés créées avant elle sont désactivées ; jamais une clé plus récente
+		// (un paquet généré après celui-ci, peut-être déjà installé).
 		var off, failed []string
-		others, _ := s.Store.Keys(ctx, b.Name)
+		others, _ := s.Store.Keys(ctx, b.Name) // les plus récentes d'abord
+		older := false
 		for _, x := range others {
-			if x.ID == k.ID || (x.Status != store.KeyIssued && x.Status != store.KeyInstalled) {
+			if x.ID == k.ID {
+				older = true
+				continue
+			}
+			if !older || (x.Status != store.KeyIssued && x.Status != store.KeyInstalled) {
 				continue
 			}
 			if err := o.account.SetAccessKeyActive(wctx, x.UserName, x.ID, false); err != nil {
@@ -517,7 +647,9 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 				_ = s.Store.Audit(ctx, "clé désactivée", b.Name, store.ResultError, "clé "+maskKey(x.ID)+" : "+err.Error())
 				continue
 			}
-			_ = s.Store.SetKeyStatus(ctx, x.ID, store.KeyDeactivated)
+			if err := s.Store.SetKeyStatus(ctx, x.ID, store.KeyDeactivated); err != nil {
+				failed = append(failed, maskKey(x.ID)+" désactivée chez Wasabi, état non enregistré : "+err.Error())
+			}
 			_ = s.Store.Audit(ctx, "clé désactivée", b.Name, store.ResultOK, "clé "+maskKey(x.ID)+" remplacée par "+maskKey(k.ID))
 			off = append(off, maskKey(x.ID))
 		}
@@ -549,7 +681,11 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 				st = store.KeyInstalled
 			}
 		}
-		_ = s.Store.SetKeyStatus(ctx, k.ID, st)
+		if err := s.Store.SetKeyStatus(ctx, k.ID, st); err != nil {
+			audit(what, store.ResultError, " : fait chez Wasabi, état non enregistré : "+err.Error())
+			done("Fait chez Wasabi, mais l'état n'a pas été enregistré dans la console : " + err.Error())
+			return
+		}
 		audit(what, store.ResultOK, "")
 		if active {
 			done("Clé réactivée.")
@@ -566,7 +702,11 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 			done("Wasabi a refusé : " + err.Error())
 			return
 		}
-		_ = s.Store.SetKeyStatus(ctx, k.ID, store.KeyDeleted)
+		if err := s.Store.SetKeyStatus(ctx, k.ID, store.KeyDeleted); err != nil {
+			audit("clé supprimée", store.ResultError, " : supprimée chez Wasabi, état non enregistré : "+err.Error())
+			done("Supprimée chez Wasabi, mais l'état n'a pas été enregistré dans la console : " + err.Error())
+			return
+		}
 		audit("clé supprimée", store.ResultOK, "")
 		done("Clé supprimée.")
 	default:

@@ -10,7 +10,7 @@
 {{if not $d.Blocked}}
 <section class="narrow">
 <form method="post" action="/buckets/{{$d.Bucket.Name}}/corriger/{{$d.What}}" autocomplete="off">
-  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="seen" value="{{$d.Seen}}">
   <label>Pour écrire ce réglage chez Wasabi, retaper le nom du bucket
     <input name="confirm" required autocomplete="off" spellcheck="false" placeholder="{{$d.Bucket.Name}}"></label>
   <button>Appliquer chez Wasabi</button>

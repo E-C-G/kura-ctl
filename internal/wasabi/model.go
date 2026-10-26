@@ -3,6 +3,7 @@ package wasabi
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Template est un modèle de réglages de bucket (specs §5).
@@ -61,6 +62,27 @@ func (s Settings) known(name string) bool {
 	return kept
 }
 
+// Uncovered renvoie les utilisateurs de poste à qui la stratégie de bucket ne refuse
+// pas la suppression de versions (stratégie lisible et présente seulement).
+func (s Settings) Uncovered(users []string) []string {
+	if !s.known("policy") || !s.Policy.DenyVersionDeletion {
+		return nil
+	}
+	var out []string
+	for _, u := range users {
+		ok := false
+		for _, p := range s.Policy.DeniedTo {
+			if p == "*" || strings.HasSuffix(p, ":user/"+u) {
+				ok = true
+			}
+		}
+		if !ok {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // Audit compare les réglages relevés au modèle. L'ordre suit la gravité.
 func (t Template) Audit(s Settings) []Deviation {
 	var out []Deviation
@@ -112,7 +134,7 @@ func (t Template) Audit(s Settings) []Deviation {
 			add("strategie", High, FixAfter, "pas de stratégie de bucket : aucune deuxième barrière si la stratégie d'une clé de poste est trop large")
 		default:
 			if t.DenyVersionDeletion && !s.Policy.DenyVersionDeletion {
-				add("strategie-versions", High, FixAfter, "la stratégie de bucket n'interdit pas la suppression de versions")
+				add("strategie-versions", High, FixAfter, "la stratégie de bucket n'interdit pas la suppression de versions aux clés des postes")
 			}
 			if t.DenyInsecureTransport && !s.Policy.DenyInsecureTransport {
 				add("strategie-https", Medium, FixAfter, "la stratégie de bucket n'interdit pas l'accès sans HTTPS")

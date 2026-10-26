@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -62,11 +63,14 @@ type fakeAccount struct {
 	akeys    map[string][]wasabi.AccessKey
 	n        int
 	writes   []string
+	used     map[string]time.Time // clé → dernière utilisation
+	usedErr  error                // GetAccessKeyLastUsed indisponible
+	other    map[string]string    // utilisateur → autre droit (stratégie, groupe…)
 }
 
 func newFakeAccount(k wasabi.Keys) *fakeAccount {
 	return &fakeAccount{keys: k, settings: map[string]wasabi.Settings{}, users: map[string]bool{},
-		policies: map[string]string{}, akeys: map[string][]wasabi.AccessKey{}}
+		policies: map[string]string{}, akeys: map[string][]wasabi.AccessKey{}, used: map[string]time.Time{}, other: map[string]string{}}
 }
 
 func (f *fakeAccount) ListBuckets(context.Context) ([]wasabi.BucketInfo, error) {
@@ -112,7 +116,19 @@ func (f *fakeAccount) edit(bucket string, fn func(*wasabi.Settings) error) error
 func (f *fakeAccount) PutBucketPolicy(_ context.Context, bucket, _, doc string) error {
 	f.writes = append(f.writes, "policy "+bucket)
 	return f.edit(bucket, func(s *wasabi.Settings) error {
-		s.Policy = wasabi.Policy{Present: true, DenyInsecureTransport: true, DenyVersionDeletion: true, Document: doc}
+		var d struct {
+			Statement []struct {
+				Sid       string
+				Principal struct{ AWS []string }
+			}
+		}
+		_ = json.Unmarshal([]byte(doc), &d)
+		s.Policy = wasabi.Policy{Present: true, DenyInsecureTransport: strings.Contains(doc, "SecureTransport"), Document: doc}
+		for _, st := range d.Statement {
+			if st.Sid == "PostesSansSuppression" {
+				s.Policy.DenyVersionDeletion, s.Policy.DeniedTo = true, st.Principal.AWS
+			}
+		}
 		return nil
 	})
 }
@@ -139,6 +155,17 @@ func (f *fakeAccount) EnsureUser(_ context.Context, name string) (bool, error) {
 	created := !f.users[name]
 	f.users[name] = true
 	return created, nil
+}
+func (f *fakeAccount) CheckPosteUser(_ context.Context, user, bucket string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if o := f.other[user]; o != "" {
+		return errors.New(user + " a une autre stratégie (" + o + ")")
+	}
+	if doc, ok := f.policies[user+"/"+wasabi.PosteUserPolicy]; ok && wasabi.PosteBucketOf(doc) != bucket {
+		return errors.New(user + " donne déjà accès à un autre bucket")
+	}
+	return nil
 }
 func (f *fakeAccount) PutUserPolicy(_ context.Context, user, name, doc string) error {
 	f.mu.Lock()
@@ -190,8 +217,10 @@ func (f *fakeAccount) DeleteAccessKey(_ context.Context, user, id string) error 
 	f.akeys[user] = ks
 	return nil
 }
-func (f *fakeAccount) AccessKeyLastUsed(context.Context, string) (time.Time, error) {
-	return time.Time{}, nil
+func (f *fakeAccount) AccessKeyLastUsed(_ context.Context, id string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.used[id], f.usedErr
 }
 
 type harness struct {

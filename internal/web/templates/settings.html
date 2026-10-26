@@ -12,7 +12,8 @@
     <li>Saisir ici sa clé d'accès, puis supprimer l'ancienne clé en lecture seule de la console.</li>
   </ol>
   <pre class="doc">{{$a.Policy}}</pre>
-  <p class="hint">Aucun droit sur le contenu des sauvegardes ni de contournement de rétention ; droits IAM limités aux utilisateurs <code>kura-*</code>, jamais sur <code>kura-ctl*</code> (la console ne peut pas s'accorder plus de droits).</p>
+  <p class="hint">Seulement les droits dont la console se sert : utilisateurs <code>kura-*</code> et leurs clés, stratégie, cycle de vie et rétention par défaut des buckets. Pas de lecture des données, ni de création ou de suppression de bucket.</p>
+  <p class="hint"><strong>Limite :</strong> qui peut poser la stratégie d'un utilisateur <code>kura-*</code> ou d'un bucket peut aussi s'ouvrir des droits étendus. Volée, cette clé donne un large accès au compte ; seules les versions verrouillées en mode conformité y résistent. Elle ne vit que chiffrée dans le trousseau de ce poste, derrière le mot de passe maître.</p>
 </details>
 <form method="post" action="/settings/admin-key" autocomplete="off" class="narrow">
   <input type="hidden" name="csrf" value="{{.CSRF}}">

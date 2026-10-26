@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ type Admin interface {
 	PutLifecycle(ctx context.Context, bucket, region string, t Template) error
 	PutDefaultRetention(ctx context.Context, bucket, region, mode string, days int) error
 	EnsureUser(ctx context.Context, name string) (created bool, err error)
+	CheckPosteUser(ctx context.Context, user, bucket string) error
 	PutUserPolicy(ctx context.Context, user, name, doc string) error
 	CreateAccessKey(ctx context.Context, user string) (AccessKey, error)
 	ListAccessKeys(ctx context.Context, user string) ([]AccessKey, error)
@@ -202,6 +204,80 @@ func (c *Client) EnsureUser(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
+// PosteUserPolicy : nom de la stratégie en ligne des utilisateurs de poste.
+const PosteUserPolicy = "kura-acces-bucket"
+
+// CheckPosteUser vérifie qu'un utilisateur de poste existant n'a pas d'autre droit
+// que sa stratégie de poste, et que celle-ci vise bien ce bucket : la console ne
+// réutilise jamais un utilisateur qui servirait à autre chose.
+func (c *Client) CheckPosteUser(ctx context.Context, user, bucket string) error {
+	cl := c.iam()
+	pols, err := cl.ListUserPolicies(ctx, &iam.ListUserPoliciesInput{UserName: aws.String(user)})
+	if err != nil {
+		return fmt.Errorf("stratégies de %s : %w", user, explain(err))
+	}
+	for _, name := range pols.PolicyNames {
+		if name != PosteUserPolicy {
+			return fmt.Errorf("%s a une autre stratégie (%s) : utilisateur non créé par la console, à vérifier dans Wasabi", user, name)
+		}
+		out, err := cl.GetUserPolicy(ctx, &iam.GetUserPolicyInput{UserName: aws.String(user), PolicyName: aws.String(name)})
+		if err != nil {
+			return fmt.Errorf("stratégie de %s : %w", user, explain(err))
+		}
+		doc := aws.ToString(out.PolicyDocument)
+		if d, err := url.QueryUnescape(doc); err == nil { // IAM renvoie le document encodé en URL
+			doc = d
+		}
+		if b := PosteBucketOf(doc); b != bucket {
+			return fmt.Errorf("%s donne déjà accès au bucket %q, pas à %s", user, b, bucket)
+		}
+	}
+	att, err := cl.ListAttachedUserPolicies(ctx, &iam.ListAttachedUserPoliciesInput{UserName: aws.String(user)})
+	if err != nil {
+		return fmt.Errorf("stratégies attachées à %s : %w", user, explain(err))
+	}
+	if len(att.AttachedPolicies) > 0 {
+		return fmt.Errorf("%s a des stratégies attachées (%s) : utilisateur non créé par la console, à vérifier dans Wasabi",
+			user, aws.ToString(att.AttachedPolicies[0].PolicyName))
+	}
+	groups, err := cl.ListGroupsForUser(ctx, &iam.ListGroupsForUserInput{UserName: aws.String(user)})
+	if err != nil {
+		return fmt.Errorf("groupes de %s : %w", user, explain(err))
+	}
+	if len(groups.Groups) > 0 {
+		return fmt.Errorf("%s appartient au groupe %s : utilisateur non créé par la console, à vérifier dans Wasabi",
+			user, aws.ToString(groups.Groups[0].GroupName))
+	}
+	return nil
+}
+
+// PosteBucketOf renvoie le bucket visé par une stratégie de poste ("" si aucun ou
+// plusieurs).
+func PosteBucketOf(doc string) string {
+	var d struct {
+		Statement []struct {
+			Resource json.RawMessage `json:"Resource"`
+		} `json:"Statement"`
+	}
+	if json.Unmarshal([]byte(doc), &d) != nil {
+		return ""
+	}
+	found := ""
+	for _, st := range d.Statement {
+		for _, r := range actions(st.Resource) {
+			b := strings.TrimSuffix(strings.TrimPrefix(r, "arn:aws:s3:::"), "/*")
+			if b == r || b == "" || strings.ContainsAny(b, "*?/") {
+				return ""
+			}
+			if found != "" && found != b {
+				return ""
+			}
+			found = b
+		}
+	}
+	return found
+}
+
 // PutUserPolicy pose (ou remplace) la stratégie en ligne d'un utilisateur.
 func (c *Client) PutUserPolicy(ctx context.Context, user, name, doc string) error {
 	if _, err := c.iam().PutUserPolicy(ctx, &iam.PutUserPolicyInput{UserName: aws.String(user), PolicyName: aws.String(name), PolicyDocument: aws.String(doc)}); err != nil {
@@ -294,23 +370,37 @@ func render(d policyDoc) string {
 	return strings.TrimSpace(b.String())
 }
 
-// ProtectedActions : réservées à la console (et au compte racine) par la stratégie de
-// bucket, deuxième barrière si la stratégie d'une clé de poste est trop large.
+// ProtectedActions : refusées aux utilisateurs des postes par la stratégie de bucket,
+// deuxième barrière si la stratégie d'une clé de poste était trop large.
 var ProtectedActions = []string{
 	"s3:DeleteObjectVersion",
 	"s3:BypassGovernanceRetention",
+	"s3:PutObjectRetention",
 	"s3:PutLifecycleConfiguration",
 	"s3:PutBucketVersioning",
 	"s3:PutBucketObjectLockConfiguration",
+	"s3:PutBucketPolicy",
+	"s3:DeleteBucketPolicy",
+	"s3:DeleteBucket",
 }
 
-// BucketPolicy génère la stratégie de bucket du modèle : refus du HTTP non chiffré, et
-// actions protégées refusées à tous sauf l'utilisateur de la console et le compte
-// racine (jamais d'exclusion de soi-même). La modification de la stratégie n'est pas
-// protégée : la console peut toujours la corriger.
-func BucketPolicy(t Template, bucket string, id Identity) (string, error) {
-	if id.AccountID == "" || id.UserName == "" {
-		return "", errors.New("stratégie de bucket : identité de la console inconnue")
+// UserArn : ARN d'un utilisateur IAM du compte.
+func UserArn(accountID, user string) string { return "arn:aws:iam::" + accountID + ":user/" + user }
+
+// BucketPolicy génère la stratégie de bucket du modèle :
+//   - refus du HTTP non chiffré, à tous (condition aws:SecureTransport, documentée
+//     par Wasabi) ;
+//   - refus des actions protégées aux seuls utilisateurs des postes de ce bucket,
+//     nommés un par un. Pas de refus « à tous sauf la console » : il faudrait une
+//     clé de condition sur l'identité (aws:PrincipalArn) que Wasabi ne documente
+//     pas, et une clé absente rendrait le refus applicable à tous, console et compte
+//     racine compris. Nommer les principaux refusés ne peut, au pire, que ne pas
+//     protéger ; jamais enfermer la console hors du bucket.
+//
+// Sans utilisateur de poste connu, seule la règle HTTPS est générée.
+func BucketPolicy(t Template, bucket, accountID string, posteUsers []string) (string, error) {
+	if accountID == "" {
+		return "", errors.New("stratégie de bucket : numéro de compte inconnu")
 	}
 	res := []string{"arn:aws:s3:::" + bucket, "arn:aws:s3:::" + bucket + "/*"}
 	d := policyDoc{Version: "2012-10-17"}
@@ -319,13 +409,16 @@ func BucketPolicy(t Template, bucket string, id Identity) (string, error) {
 			Action: []string{"s3:*"}, Resource: res,
 			Condition: map[string]map[string]any{"Bool": {"aws:SecureTransport": "false"}}})
 	}
-	if t.DenyVersionDeletion {
-		d.Statement = append(d.Statement, statement{Sid: "ReserveALaConsole", Effect: "Deny", Principal: map[string]string{"AWS": "*"},
-			Action: ProtectedActions, Resource: res,
-			Condition: map[string]map[string]any{"StringNotEquals": {"aws:PrincipalArn": []string{
-				"arn:aws:iam::" + id.AccountID + ":user/" + id.UserName,
-				"arn:aws:iam::" + id.AccountID + ":root",
-			}}}})
+	if t.DenyVersionDeletion && len(posteUsers) > 0 {
+		var arns []string
+		for _, u := range posteUsers {
+			if !strings.HasPrefix(u, "kura-") || strings.HasPrefix(u, "kura-ctl") {
+				return "", fmt.Errorf("stratégie de bucket : %q n'est pas un utilisateur de poste", u)
+			}
+			arns = append(arns, UserArn(accountID, u))
+		}
+		d.Statement = append(d.Statement, statement{Sid: "PostesSansSuppression", Effect: "Deny", Principal: map[string]any{"AWS": arns},
+			Action: ProtectedActions, Resource: res})
 	}
 	return render(d), nil
 }
@@ -346,57 +439,56 @@ func PostePolicy(bucket string) string {
 }
 
 // AdminPolicy est la stratégie à donner à l'utilisateur de la console (kura-ctl-admin),
-// avec la stratégie gérée WasabiBucketStatsAccess. Pas de droit de contournement, pas
-// d'accès aux données, et aucun droit IAM sur kura-ctl* : la console ne peut ni se
-// donner plus de droits ni se créer de clé.
+// avec la stratégie gérée WasabiBucketStatsAccess. Seuls les droits dont le lot 2 se
+// sert : gérer les utilisateurs kura-* et leurs clés, lire et écrire les réglages des
+// buckets (stratégie, cycle de vie, rétention par défaut). Ni lecture des données, ni
+// création ou suppression de bucket, ni contournement de rétention.
+//
+// Limite à connaître : pouvoir poser la stratégie d'un utilisateur kura-* permet à
+// qui détient cette clé de créer un utilisateur aux droits étendus, et poser une
+// stratégie de bucket lui permet de s'ouvrir les données. Cette clé vaut donc, si
+// elle est volée, un accès étendu au compte : seules les versions verrouillées en
+// mode conformité (COMPLIANCE) y résistent. Elle ne vit que chiffrée dans le
+// trousseau du poste de l'éditeur.
 func AdminPolicy() string {
 	return render(policyDoc{Version: "2012-10-17", Statement: []statement{
-		{Sid: "SeConnaitre", Effect: "Allow", Action: []string{"iam:GetUser", "iam:ListUsers"}, Resource: []string{"*"}},
+		{Sid: "SeConnaitre", Effect: "Allow", Action: []string{"iam:GetUser"}, Resource: []string{"*"}},
 		{Sid: "GererLesUtilisateursDesPostes", Effect: "Allow",
 			Action: []string{"iam:CreateUser", "iam:GetUser", "iam:PutUserPolicy", "iam:GetUserPolicy", "iam:ListUserPolicies",
+				"iam:ListAttachedUserPolicies", "iam:ListGroupsForUser",
 				"iam:CreateAccessKey", "iam:ListAccessKeys", "iam:UpdateAccessKey", "iam:DeleteAccessKey", "iam:GetAccessKeyLastUsed"},
 			Resource: []string{"arn:aws:iam::*:user/kura-*"}},
-		{Sid: "JamaisSurLaConsoleElleMeme", Effect: "Deny",
+		{Sid: "PasSurLaConsoleElleMeme", Effect: "Deny",
 			Action: []string{"iam:CreateUser", "iam:DeleteUser", "iam:UpdateUser", "iam:PutUserPolicy", "iam:DeleteUserPolicy",
 				"iam:AttachUserPolicy", "iam:DetachUserPolicy", "iam:CreateAccessKey", "iam:UpdateAccessKey", "iam:DeleteAccessKey",
 				"iam:CreateLoginProfile", "iam:UpdateLoginProfile", "iam:AddUserToGroup"},
 			Resource: []string{"arn:aws:iam::*:user/kura-ctl*"}},
 		{Sid: "ReglerLesBuckets", Effect: "Allow",
-			Action: []string{"s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:CreateBucket",
-				"s3:GetBucketVersioning", "s3:PutBucketVersioning",
+			Action: []string{"s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetBucketVersioning",
 				"s3:GetBucketObjectLockConfiguration", "s3:PutBucketObjectLockConfiguration",
 				"s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
-				"s3:GetBucketPolicy", "s3:PutBucketPolicy",
-				"s3:GetBucketTagging", "s3:PutBucketTagging"},
+				"s3:GetBucketPolicy", "s3:PutBucketPolicy"},
 			Resource: []string{"*"}},
 	}})
 }
 
-// UserNameFor nomme l'utilisateur d'un poste : kura-<client>-<poste>, ou
-// kura-<bucket> sans poste. Jamais kura-ctl… (réservé à la console).
-func UserNameFor(client, poste, bucket string) (string, error) {
-	slug := func(s string) string {
-		s = strings.ToLower(strings.TrimSpace(s))
-		var b strings.Builder
-		for _, r := range s {
-			switch {
-			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-				b.WriteRune(r)
-			case r == '-' || r == '_' || r == ' ' || r == '.':
-				b.WriteByte('-')
-			}
-		}
-		return strings.Trim(b.String(), "-")
+var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
+
+// UserNameFor nomme l'utilisateur du poste qui sauvegarde dans un bucket :
+// kura-<bucket>. Un bucket = un utilisateur : les noms de bucket étant uniques dans
+// le compte, deux postes ne peuvent pas recevoir le même utilisateur (le second
+// retirerait l'accès au premier). Jamais kura-ctl… (réservé à la console), jamais
+// tronqué.
+func UserNameFor(bucket string) (string, error) {
+	if !bucketName.MatchString(bucket) {
+		return "", fmt.Errorf("nom de bucket %q inattendu", bucket)
 	}
-	name := "kura-" + slug(bucket)
-	if p := slug(poste); p != "" && slug(client) != "" {
-		name = "kura-" + slug(client) + "-" + p
-	}
+	name := "kura-" + bucket
 	if len(name) > 64 {
-		name = name[:64]
+		return "", fmt.Errorf("nom de bucket trop long pour nommer son utilisateur (%s : 64 caractères au plus)", name)
 	}
-	if strings.HasPrefix(name, "kura-ctl") || name == "kura-" {
-		return "", fmt.Errorf("nom d'utilisateur %q réservé ou vide", name)
+	if strings.HasPrefix(name, "kura-ctl") {
+		return "", fmt.Errorf("nom d'utilisateur %q réservé à la console", name)
 	}
 	return name, nil
 }

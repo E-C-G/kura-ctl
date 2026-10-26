@@ -64,3 +64,5 @@ strong.password { font-family: ui-monospace, SFMono-Regular, Consolas, monospace
 .actions input { width: 160px; display: inline-block; margin: 0; }
 button.small { padding: 4px 10px; font-size: 13px; }
 button.danger { background: var(--crit); border-color: var(--crit); }
+label.check { display: flex; flex-direction: row; align-items: center; gap: .4rem; font-weight: normal; margin: .25rem 0; white-space: nowrap; }
+label.check input { width: auto; margin: 0; }

@@ -141,8 +141,7 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
       "Sid": "SeConnaitre",
       "Effect": "Allow",
       "Action": [
-        "iam:GetUser",
-        "iam:ListUsers"
+        "iam:GetUser"
       ],
       "Resource": [
         "*"
@@ -157,6 +156,8 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
         "iam:PutUserPolicy",
         "iam:GetUserPolicy",
         "iam:ListUserPolicies",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListGroupsForUser",
         "iam:CreateAccessKey",
         "iam:ListAccessKeys",
         "iam:UpdateAccessKey",
@@ -168,7 +169,7 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
       ]
     },
     {
-      "Sid": "JamaisSurLaConsoleElleMeme",
+      "Sid": "PasSurLaConsoleElleMeme",
       "Effect": "Deny",
       "Action": [
         "iam:CreateUser",
@@ -195,17 +196,13 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
       "Action": [
         "s3:ListAllMyBuckets",
         "s3:GetBucketLocation",
-        "s3:CreateBucket",
         "s3:GetBucketVersioning",
-        "s3:PutBucketVersioning",
         "s3:GetBucketObjectLockConfiguration",
         "s3:PutBucketObjectLockConfiguration",
         "s3:GetLifecycleConfiguration",
         "s3:PutLifecycleConfiguration",
         "s3:GetBucketPolicy",
-        "s3:PutBucketPolicy",
-        "s3:GetBucketTagging",
-        "s3:PutBucketTagging"
+        "s3:PutBucketPolicy"
       ],
       "Resource": [
         "*"
@@ -215,11 +212,16 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
 }
 ```
 
-- Aucun accès au contenu des sauvegardes (ni `GetObject`, ni `DeleteObject…`), aucun
-  contournement de rétention (`BypassGovernanceRetention`).
-- Droits IAM limités aux utilisateurs `kura-*` (les postes) ; refus explicite sur `kura-ctl*` :
-  la console ne peut ni modifier ses propres droits ni se créer de clé.
-- `CreateBucket` sert au lot 4.
+- Seulement les droits dont la console se sert : utilisateurs `kura-*` et leurs clés,
+  stratégie, cycle de vie et rétention par défaut des buckets. Ni lecture des données
+  (`GetObject`…), ni création ou suppression de bucket, ni contournement de rétention.
+- Refus explicite sur `kura-ctl*` : la console ne peut pas modifier son propre utilisateur.
+- **Limite à connaître** : qui peut poser la stratégie d'un utilisateur `kura-*` peut créer un
+  utilisateur aux droits étendus, et qui peut poser une stratégie de bucket peut s'ouvrir les
+  données. Volée, cette clé donne donc un large accès au compte ; seules les versions
+  verrouillées en mode conformité (COMPLIANCE) y résistent. Elle ne vit que chiffrée dans le
+  trousseau du poste de l'éditeur, derrière le mot de passe maître : disque chiffré et session
+  verrouillée sur ce poste.
 
 ## Sécuriser un bucket existant (lot 2)
 
@@ -227,12 +229,22 @@ Sur la page d'un bucket, section *Sécuriser le bucket* :
 
 | Réglage | Ce qui est écrit |
 | --- | --- |
-| Stratégie de bucket | refus du HTTP non chiffré ; refus, à tous sauf `kura-ctl-admin` et au compte racine, de supprimer une version, de contourner une rétention, de changer le cycle de vie, le versioning ou l'Object Lock. La stratégie elle-même reste modifiable : la console ne peut pas s'enfermer dehors. |
+| Stratégie de bucket | refus du HTTP non chiffré, à tous ; refus aux utilisateurs des postes de ce bucket (nommés un par un) de supprimer une version, de contourner ou poser une rétention, de changer le cycle de vie, le versioning, l'Object Lock ou la stratégie, de supprimer le bucket. |
 | Cycle de vie | anciennes versions supprimées après 90 jours, marqueurs orphelins nettoyés, envois interrompus abandonnés après 7 jours ; les versions courantes ne sont jamais expirées |
 | Rétention par défaut | gouvernance 30 jours, si l'Object Lock est actif (il ne s'active qu'à la création du bucket) |
 
 L'aperçu montre le réglage actuel et le nouveau : chaque écriture **remplace** le réglage
-entier (une stratégie qui accordait autre chose est remplacée). Exemple de stratégie générée :
+entier (une stratégie qui accordait autre chose est remplacée ; l'ancienne est gardée dans le
+journal d'audit). L'aperçu relit le réglage chez Wasabi à l'instant ; si le réglage change
+entre l'aperçu et la confirmation, l'écriture est refusée.
+
+La stratégie ne vise jamais la console ni le compte racine : elle nomme les utilisateurs
+refusés plutôt que de refuser « à tous sauf la console », ce qui demanderait une clé de
+condition sur l'identité (`aws:PrincipalArn`) que Wasabi ne documente pas ; une clé absente
+rendrait le refus applicable à tous. Au pire, elle ne protège pas ; elle ne peut pas enfermer
+la console hors du bucket. Tant qu'aucune clé de poste n'a été créée par la console, seule la
+règle HTTPS est posée ; après la création de la clé du poste, la page du bucket signale
+l'écart et propose de réappliquer la stratégie. Exemple de stratégie générée :
 
 ```json
 {
@@ -258,30 +270,28 @@ entier (une stratégie qui accordait autre chose est remplacée). Exemple de str
       }
     },
     {
-      "Sid": "ReserveALaConsole",
+      "Sid": "PostesSansSuppression",
       "Effect": "Deny",
       "Principal": {
-        "AWS": "*"
+        "AWS": [
+          "arn:aws:iam::100000000042:user/kura-acme-srv01"
+        ]
       },
       "Action": [
         "s3:DeleteObjectVersion",
         "s3:BypassGovernanceRetention",
+        "s3:PutObjectRetention",
         "s3:PutLifecycleConfiguration",
         "s3:PutBucketVersioning",
-        "s3:PutBucketObjectLockConfiguration"
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:DeleteBucket"
       ],
       "Resource": [
         "arn:aws:s3:::acme-srv01",
         "arn:aws:s3:::acme-srv01/*"
-      ],
-      "Condition": {
-        "StringNotEquals": {
-          "aws:PrincipalArn": [
-            "arn:aws:iam::100000000042:user/kura-ctl-admin",
-            "arn:aws:iam::100000000042:root"
-          ]
-        }
-      }
+      ]
     }
   ]
 }
@@ -289,8 +299,9 @@ entier (une stratégie qui accordait autre chose est remplacée). Exemple de str
 
 ## Clé d'un poste et paquet `.kura` (lot 2)
 
-*Créer une clé et un paquet* crée si besoin l'utilisateur `kura-<client>-<poste>` avec la
-stratégie ci-dessous (son seul bucket, sans droit de supprimer une version), puis une clé
+*Créer une clé et un paquet* crée si besoin l'utilisateur `kura-<bucket>` (un utilisateur par
+bucket : deux postes ne reçoivent jamais le même ; un utilisateur `kura-*` existant n'est repris
+que s'il n'a pas d'autre droit que l'accès à ce bucket) avec la stratégie ci-dessous (son seul bucket, sans droit de supprimer une version), puis une clé
 d'accès, remise dans un paquet `.kura` chiffré (AES-256-GCM, PBKDF2-SHA256) :
 
 - le **mot de passe** du paquet s'affiche une seule fois, à transmettre par un autre chemin
@@ -299,8 +310,10 @@ d'accès, remise dans un paquet `.kura` chiffré (AES-256-GCM, PBKDF2-SHA256) :
   pendant 72 heures ; la console ne garde pas le secret ;
 - sur le poste, `kura-agent import fichier.kura` (kura-agent 0.5 ou plus récent, console
   d'administration) essaie la clé auprès de Wasabi avant de remplacer l'ancienne ;
-- une fois la sauvegarde suivante réussie, *Confirmer l'installation* : la console désactive
-  les clés qu'elle avait créées avant pour ce poste ; une clé désactivée reste réactivable,
+- une fois la sauvegarde suivante réussie, *Confirmer l'installation* (nom du bucket à
+  retaper) : la console vérifie auprès de Wasabi que la nouvelle clé a déjà servi (sinon rien
+  n'est désactivé), puis désactive les clés qu'elle avait créées **avant** elle pour ce poste,
+  jamais une plus récente ; une clé désactivée reste réactivable,
   et devient supprimable après 7 jours. Une ancienne clé créée à la main dans Wasabi se
   désactive dans la console Wasabi (la console n'a de droits que sur les utilisateurs `kura-*`).
 

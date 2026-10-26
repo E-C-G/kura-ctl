@@ -39,7 +39,8 @@ const f = process.argv[2];
     // Lot 2 : correction de la stratégie, clé du poste, paquet .kura.
     await page.goto(base + 'buckets/acme-srv01');
     await Promise.all([page.waitForNavigation(), page.click('text=Voir et appliquer la stratégie du modèle')]);
-    console.log('8. aperçu stratégie', (await page.textContent('pre.doc >> nth=1')).includes('kura-ctl-admin'));
+    const proposed = await page.textContent('pre.doc >> nth=1');
+    console.log('8. aperçu stratégie', proposed.includes('SecureTransport') && !proposed.includes('kura-ctl-admin'));
     await page.fill('input[name=confirm]', 'acme-srv01');
     await Promise.all([page.waitForNavigation(), page.click('text=Appliquer chez Wasabi')]);
     console.log('9. stratégie appliquée', (await page.textContent('body')).includes('appliqué et vérifié par relecture'));
@@ -54,8 +55,15 @@ const f = process.argv[2];
     const pk = JSON.parse(fs.readFileSync(file, 'utf8'));
     console.log('11. paquet téléchargé', dl.suggestedFilename(), pk.format, !fs.readFileSync(file, 'utf8').includes('secret-poste'));
     await page.goto(base + 'buckets/acme-srv01');
+    await page.fill('form[action$="/installee"] input[name=confirm]', 'acme-srv01');
     await Promise.all([page.waitForNavigation(), page.click('text=Confirmer l\'installation')]);
-    console.log('12. installation confirmée', (await page.textContent('body')).includes('Installation confirmée'));
+    // Le faux compte n'a jamais vu la clé servir : rien n'est désactivé.
+    console.log('12. confirmation refusée sans preuve', (await page.textContent('body')).includes('jamais servi'));
+    await page.goto(base + 'buckets/acme-srv01/corriger/strategie');
+    console.log('13. stratégie à réappliquer', (await page.textContent('pre.doc >> nth=1')).includes('user/kura-acme-srv01'));
+    await page.fill('input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Appliquer chez Wasabi')]);
+    console.log('14. stratégie réappliquée', (await page.textContent('body')).includes('appliqué et vérifié par relecture'));
     await page.screenshot({ path: f + '-bucket.png', fullPage: true });
     fs.writeFileSync(f + '.pw', pw);
   } catch (e) {
