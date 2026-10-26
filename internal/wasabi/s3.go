@@ -31,6 +31,7 @@ type Client struct {
 	keys     Keys
 	http     *http.Client
 	endpoint func(region string) string // URL S3 d'une région
+	iamURL   string                     // tests ; vide : IAMEndpoint
 }
 
 // NewClient prépare un client pour la clé donnée.
@@ -181,6 +182,9 @@ type Policy struct {
 	Present               bool `json:"present"`
 	DenyInsecureTransport bool `json:"deny_insecure_transport,omitempty"`
 	DenyVersionDeletion   bool `json:"deny_version_deletion,omitempty"`
+	// Exceptions : principaux exclus du refus de suppression de versions.
+	Exceptions []string `json:"exceptions,omitempty"`
+	Document   string   `json:"document,omitempty"` // texte de la stratégie, pour l'aperçu
 }
 
 // ReadSettings relève les réglages d'un bucket. Un réglage illisible n'arrête pas
@@ -284,7 +288,7 @@ func wholeBucket(r types.LifecycleRule) bool {
 // refus du HTTP non chiffré (condition aws:SecureTransport = false) et refus sans
 // condition de la suppression de versions.
 func summarizePolicy(doc string) Policy {
-	p := Policy{Present: strings.TrimSpace(doc) != ""}
+	p := Policy{Present: strings.TrimSpace(doc) != "", Document: doc}
 	var d struct {
 		Statement json.RawMessage `json:"Statement"`
 	}
@@ -319,18 +323,53 @@ func summarizePolicy(doc string) Policy {
 			}
 		}
 		// Un refus conditionnel (HTTP seulement, adresse IP…) laisse la suppression
-		// possible hors de la condition : il ne compte pas.
-		if len(s.Condition) > 0 {
+		// possible hors de la condition : il ne compte pas, sauf s'il ne fait
+		// qu'excepter des principaux nommés (la console, le compte racine).
+		except, onlyExceptions := principalExceptions(s.Condition)
+		if len(s.Condition) > 0 && !onlyExceptions {
 			continue
 		}
 		for _, a := range actions(s.Action) {
 			switch strings.ToLower(a) {
 			case "s3:deleteobjectversion", "s3:*", "s3:delete*", "*":
 				p.DenyVersionDeletion = true
+				p.Exceptions = append(p.Exceptions, except...)
 			}
 		}
 	}
 	return p
+}
+
+// principalExceptions : la condition ne porte que sur aws:PrincipalArn, avec un
+// opérateur négatif (refus à tous sauf ces principaux).
+func principalExceptions(cond map[string]map[string]any) ([]string, bool) {
+	if len(cond) == 0 {
+		return nil, false
+	}
+	var out []string
+	for op, kv := range cond {
+		switch strings.ToLower(op) {
+		case "stringnotequals", "stringnotlike", "arnnotequals", "arnnotlike":
+		default:
+			return nil, false
+		}
+		for k, v := range kv {
+			if !strings.EqualFold(k, "aws:PrincipalArn") {
+				return nil, false
+			}
+			switch x := v.(type) {
+			case string:
+				out = append(out, x)
+			case []any:
+				for _, e := range x {
+					if s, ok := e.(string); ok {
+						out = append(out, s)
+					}
+				}
+			}
+		}
+	}
+	return out, true
 }
 
 // isFalse : "false", false ou ["false"].

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/E-C-G/kura-ctl/internal/jobs"
 	"github.com/E-C-G/kura-ctl/internal/secrets"
 	"github.com/E-C-G/kura-ctl/internal/store"
 	"github.com/E-C-G/kura-ctl/internal/wasabi"
@@ -30,7 +29,7 @@ func TestServeForBrowser(t *testing.T) {
 	defer st.Close()
 	srv := &Server{
 		Store: st, Vault: &secrets.Vault{Keyring: &memKeyring{m: map[string]string{}}, Iterations: 1000},
-		NewAccount: func(k wasabi.Keys) jobs.Account { return &fakeAccount{keys: k} },
+		NewAccount: func(k wasabi.Keys) Wasabi { return newFakeAccount(k) },
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	ln, err := srv.Listen("0")

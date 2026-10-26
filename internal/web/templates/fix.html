@@ -1,0 +1,21 @@
+{{define "content"}}{{$d := .Data}}
+<p><a href="/buckets/{{$d.Bucket.Name}}">← {{$d.Bucket.Name}}</a></p>
+<h1>{{$d.Title}} <span class="muted">· {{$d.Bucket.Name}}</span></h1>
+{{with $d.Blocked}}<p class="flash error">{{.}}</p>{{end}}
+<section class="cols">
+  <div><h2>Actuellement</h2><pre class="doc">{{$d.Current}}</pre></div>
+  <div><h2>Après correction (modèle « sauvegarde standard »)</h2><pre class="doc">{{or $d.Proposed "—"}}</pre></div>
+</section>
+{{with $d.Notes}}<ul class="notes">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+{{if not $d.Blocked}}
+<section class="narrow">
+<form method="post" action="/buckets/{{$d.Bucket.Name}}/corriger/{{$d.What}}" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Pour écrire ce réglage chez Wasabi, retaper le nom du bucket
+    <input name="confirm" required autocomplete="off" spellcheck="false" placeholder="{{$d.Bucket.Name}}"></label>
+  <button>Appliquer chez Wasabi</button>
+</form>
+<p class="hint">Après l'écriture, la console relit le réglage chez Wasabi et consigne le résultat dans le journal.</p>
+</section>
+{{end}}
+{{end}}

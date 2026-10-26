@@ -48,7 +48,7 @@ const (
 type Server struct {
 	Store      *store.Store
 	Vault      *secrets.Vault
-	NewAccount func(wasabi.Keys) jobs.Account // défaut : wasabi.NewClient
+	NewAccount func(wasabi.Keys) Wasabi // défaut : wasabi.NewClient
 	Log        *slog.Logger
 	Idle       time.Duration
 	Version    string
@@ -77,13 +77,54 @@ type session struct {
 	flash    string // message affiché une fois, à la page suivante
 }
 
+// Wasabi est le compte vu par la console : lectures (lot 1) et écritures (lot 2).
+type Wasabi interface {
+	jobs.Account
+	wasabi.Admin
+}
+
 // unlocked : ce qui n'existe que console déverrouillée. ctx est annulé au
 // verrouillage : toute tâche qui détient la clé en dérive.
 type unlocked struct {
-	account jobs.Account
+	account Wasabi
 	runner  *jobs.Runner
 	ctx     context.Context
 	cancel  context.CancelFunc
+
+	mu    sync.Mutex
+	id    *wasabi.Identity // identité de la clé, une fois connue
+	idErr error
+	idAt  time.Time
+	packs map[string]*pendingPack // paquets .kura à télécharger, par jeton
+}
+
+// pendingPack est un paquet généré, téléchargeable une fois tant que la console
+// reste déverrouillée (30 min au plus).
+type pendingPack struct {
+	bucket, keyID, file string
+	data                []byte
+	expires             time.Time
+}
+
+// identity : utilisateur IAM de la clé d'administration (mis en cache ; un échec
+// est retenté après une minute).
+func (o *unlocked) identity(ctx context.Context) (wasabi.Identity, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.id != nil {
+		return *o.id, nil
+	}
+	if o.idErr != nil && time.Since(o.idAt) < time.Minute {
+		return wasabi.Identity{}, o.idErr
+	}
+	id, err := o.account.Identity(ctx)
+	o.idAt = time.Now()
+	if err != nil {
+		o.idErr = err
+		return wasabi.Identity{}, err
+	}
+	o.id, o.idErr = &id, nil
+	return id, nil
 }
 
 func (s *Server) now() time.Time {
@@ -130,7 +171,7 @@ func (s *Server) URL() string {
 // Handler renvoie le routeur complet.
 func (s *Server) Handler() (http.Handler, error) {
 	if s.NewAccount == nil {
-		s.NewAccount = func(k wasabi.Keys) jobs.Account { return wasabi.NewClient(k) }
+		s.NewAccount = func(k wasabi.Keys) Wasabi { return wasabi.NewClient(k) }
 	}
 	if s.Idle == 0 {
 		s.Idle = DefaultIdle
@@ -162,6 +203,12 @@ func (s *Server) Handler() (http.Handler, error) {
 	app.HandleFunc("GET /settings", s.settingsPage)
 	app.HandleFunc("POST /settings", s.settingsSubmit)
 	app.HandleFunc("POST /settings/password", s.passwordSubmit)
+	app.HandleFunc("POST /settings/admin-key", s.adminKeySubmit)
+	app.HandleFunc("GET /buckets/{name}/corriger/{what}", s.fixPreview)
+	app.HandleFunc("POST /buckets/{name}/corriger/{what}", s.fixApply)
+	app.HandleFunc("POST /buckets/{name}/cles", s.createKey)
+	app.HandleFunc("GET /buckets/{name}/paquet/{token}", s.downloadPack)
+	app.HandleFunc("POST /buckets/{name}/cles/{id}/{action}", s.keyAction)
 	mux.Handle("/", s.requireSession(app))
 	return s.guard(mux), nil
 }
@@ -277,7 +324,7 @@ func (s *Server) startSession(w http.ResponseWriter, k secrets.Keys, flash strin
 	s.mu.Lock()
 	old, hadSess := s.open, s.sess != nil
 	s.sess = sess
-	s.open = &unlocked{account: acc, runner: runner, ctx: ctx, cancel: cancel}
+	s.open = &unlocked{account: acc, runner: runner, ctx: ctx, cancel: cancel, packs: map[string]*pendingPack{}}
 	s.mu.Unlock()
 	if old != nil {
 		old.cancel()

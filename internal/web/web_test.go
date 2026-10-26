@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/E-C-G/kura-ctl/internal/jobs"
 	"github.com/E-C-G/kura-ctl/internal/secrets"
 	"github.com/E-C-G/kura-ctl/internal/store"
 	"github.com/E-C-G/kura-ctl/internal/wasabi"
@@ -50,9 +50,23 @@ func (k *memKeyring) Delete(s, u string) error {
 	return nil
 }
 
+// fakeAccount : compte Wasabi en mémoire (lectures, réglages, IAM).
 type fakeAccount struct {
-	mu   sync.Mutex
-	keys wasabi.Keys
+	mu       sync.Mutex
+	keys     wasabi.Keys
+	readOnly bool // la clé ne lit pas son identité IAM
+	root     bool
+	settings map[string]wasabi.Settings
+	users    map[string]bool
+	policies map[string]string
+	akeys    map[string][]wasabi.AccessKey
+	n        int
+	writes   []string
+}
+
+func newFakeAccount(k wasabi.Keys) *fakeAccount {
+	return &fakeAccount{keys: k, settings: map[string]wasabi.Settings{}, users: map[string]bool{},
+		policies: map[string]string{}, akeys: map[string][]wasabi.AccessKey{}}
 }
 
 func (f *fakeAccount) ListBuckets(context.Context) ([]wasabi.BucketInfo, error) {
@@ -62,10 +76,122 @@ func (f *fakeAccount) ListBuckets(context.Context) ([]wasabi.BucketInfo, error) 
 	return []wasabi.BucketInfo{{Name: "acme-srv01", Region: "eu-central-1", Created: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)}}, nil
 }
 func (f *fakeAccount) ReadSettings(_ context.Context, name, region string) wasabi.Settings {
-	return wasabi.Settings{Name: name, Region: region, Versioning: "Enabled", Lifecycle: wasabi.Lifecycle{Present: true, NoncurrentDays: 90}}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.settings[name]
+	if !ok {
+		st = wasabi.Settings{Versioning: "Enabled",
+			Lifecycle: wasabi.Lifecycle{Present: true, NoncurrentDays: 90}}
+		f.settings[name] = st
+	}
+	st.Name, st.Region, st.ReadAt = name, region, time.Now()
+	return st
 }
 func (f *fakeAccount) BucketDaily(_ context.Context, b, from, to string) ([]wasabi.DailyUsage, error) {
 	return []wasabi.DailyUsage{{Day: to, PaddedBytes: 600 << 30, RawBytes: 590 << 30, Objects: 1234}}, nil
+}
+func (f *fakeAccount) Identity(context.Context) (wasabi.Identity, error) {
+	switch {
+	case f.readOnly:
+		return wasabi.Identity{}, errors.New("accès refusé : la clé de la console n'a pas ce droit")
+	case f.root:
+		return wasabi.Identity{Arn: "arn:aws:iam::100000000042:root", AccountID: "100000000042"}, nil
+	}
+	return wasabi.Identity{Arn: "arn:aws:iam::100000000042:user/kura-ctl-admin", UserName: "kura-ctl-admin", AccountID: "100000000042"}, nil
+}
+func (f *fakeAccount) edit(bucket string, fn func(*wasabi.Settings) error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.settings[bucket]
+	if err := fn(&st); err != nil {
+		return err
+	}
+	f.settings[bucket] = st
+	return nil
+}
+func (f *fakeAccount) PutBucketPolicy(_ context.Context, bucket, _, doc string) error {
+	f.writes = append(f.writes, "policy "+bucket)
+	return f.edit(bucket, func(s *wasabi.Settings) error {
+		s.Policy = wasabi.Policy{Present: true, DenyInsecureTransport: true, DenyVersionDeletion: true, Document: doc}
+		return nil
+	})
+}
+func (f *fakeAccount) PutLifecycle(_ context.Context, bucket, _ string, t wasabi.Template) error {
+	f.writes = append(f.writes, "lifecycle "+bucket)
+	return f.edit(bucket, func(s *wasabi.Settings) error {
+		s.Lifecycle = wasabi.Lifecycle{Present: true, NoncurrentDays: t.NoncurrentDays, ExpiredDeleteMarker: t.ExpiredDeleteMarker, AbortMultipartDays: t.AbortMultipartDays}
+		return nil
+	})
+}
+func (f *fakeAccount) PutDefaultRetention(_ context.Context, bucket, _, mode string, days int) error {
+	f.writes = append(f.writes, "retention "+bucket)
+	return f.edit(bucket, func(s *wasabi.Settings) error {
+		if !s.ObjectLock.Enabled {
+			return errors.New("InvalidBucketState")
+		}
+		s.ObjectLock.Mode, s.ObjectLock.Days = mode, days
+		return nil
+	})
+}
+func (f *fakeAccount) EnsureUser(_ context.Context, name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	created := !f.users[name]
+	f.users[name] = true
+	return created, nil
+}
+func (f *fakeAccount) PutUserPolicy(_ context.Context, user, name, doc string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policies[user+"/"+name] = doc
+	return nil
+}
+func (f *fakeAccount) CreateAccessKey(_ context.Context, user string) (wasabi.AccessKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.akeys[user]) >= 2 {
+		return wasabi.AccessKey{}, errors.New("LimitExceeded")
+	}
+	f.n++
+	k := wasabi.AccessKey{ID: fmt.Sprintf("AKIDPOSTE%04d", f.n), Secret: fmt.Sprintf("secret-poste-%04d", f.n), Active: true}
+	f.akeys[user] = append(f.akeys[user], k)
+	return k, nil
+}
+func (f *fakeAccount) ListAccessKeys(_ context.Context, user string) ([]wasabi.AccessKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []wasabi.AccessKey
+	for _, k := range f.akeys[user] {
+		k.Secret = ""
+		out = append(out, k)
+	}
+	return out, nil
+}
+func (f *fakeAccount) SetAccessKeyActive(_ context.Context, user, id string, active bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, k := range f.akeys[user] {
+		if k.ID == id {
+			f.akeys[user][i].Active = active
+			return nil
+		}
+	}
+	return errors.New("NoSuchEntity")
+}
+func (f *fakeAccount) DeleteAccessKey(_ context.Context, user, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ks := f.akeys[user][:0]
+	for _, k := range f.akeys[user] {
+		if k.ID != id {
+			ks = append(ks, k)
+		}
+	}
+	f.akeys[user] = ks
+	return nil
+}
+func (f *fakeAccount) AccessKeyLastUsed(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
 }
 
 type harness struct {
@@ -78,6 +204,29 @@ type harness struct {
 
 	clock   sync.Mutex
 	nowTime time.Time
+
+	accMu    sync.Mutex
+	accounts []*fakeAccount
+	accHook  func(*fakeAccount)
+}
+
+// account crée le faux compte d'une clé et le garde pour les vérifications.
+func (hn *harness) account(k wasabi.Keys) *fakeAccount {
+	a := newFakeAccount(k)
+	hn.accMu.Lock()
+	defer hn.accMu.Unlock()
+	if hn.accHook != nil {
+		hn.accHook(a)
+	}
+	hn.accounts = append(hn.accounts, a)
+	return a
+}
+
+// last : faux compte de la session en cours.
+func (hn *harness) last() *fakeAccount {
+	hn.accMu.Lock()
+	defer hn.accMu.Unlock()
+	return hn.accounts[len(hn.accounts)-1]
 }
 
 func (hn *harness) now() time.Time { hn.clock.Lock(); defer hn.clock.Unlock(); return hn.nowTime }
@@ -95,9 +244,10 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { st.Close() })
 	hn := &harness{t: t, st: st, nowTime: time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)}
+	st.SetClock(hn.now) // une seule horloge pour la console et la base
 	hn.srv = &Server{
 		Store: st, Vault: &secrets.Vault{Keyring: &memKeyring{m: map[string]string{}}, Iterations: 1000},
-		NewAccount: func(k wasabi.Keys) jobs.Account { return &fakeAccount{keys: k} },
+		NewAccount: func(k wasabi.Keys) Wasabi { return hn.account(k) },
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now:        hn.now,
 	}

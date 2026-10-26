@@ -2,10 +2,18 @@
 
 Console de l'éditeur pour les sauvegardes [Kura](https://github.com/E-C-G/kura-agent) :
 une application locale qui lit le compte Wasabi et montre, pour chaque bucket client,
-l'espace utilisé, le coût estimé et l'écart avec le modèle de réglages recommandé.
+l'espace utilisé, le coût estimé et l'écart avec le modèle de réglages recommandé,
+puis corrige ces réglages et crée la clé limitée de chaque poste.
 
-**Lot 1 « Observer » : lecture seule.** La console ne modifie rien chez Wasabi ;
-elle se contente d'une clé qui ne peut que lire.
+| Lot | Contenu | État |
+| --- | --- | --- |
+| 1 « Observer » | usage, coûts, audit des réglages, journal ; aucune écriture chez Wasabi | **fait** |
+| 2 « Sécuriser l'existant » | clé `kura-ctl-admin`, stratégie de bucket, cycle de vie, rétention, clé de poste et paquet `.kura` | **fait** |
+| 3 « Préparer les postes » | paquets d'installation complets, rotation guidée | à faire |
+| 4 « Créer proprement » | bucket neuf depuis le modèle, avec Object Lock | à faire |
+
+Toute écriture chez Wasabi passe par un aperçu de ce qui sera écrit, la saisie du nom du
+bucket, puis une relecture du réglage chez Wasabi ; le résultat va au journal d'audit.
 
 ## Ce que fait la console
 
@@ -72,7 +80,13 @@ Au premier lancement, la console demande :
    auprès de Wasabi avant d'être enregistrée ;
 3. le **tarif** au To et par mois, pour l'estimation des coûts (modifiable dans Réglages).
 
-## Clé Wasabi de la console (lecture seule)
+## Clé Wasabi de la console
+
+Deux possibilités : une clé **en lecture seule** suffit au lot 1 (observer) ; les écritures
+du lot 2 demandent l'utilisateur **`kura-ctl-admin`** (voir plus bas), dont la clé se saisit
+dans *Réglages → Clé d'administration*. La console refuse la clé du compte racine.
+
+### Lecture seule
 
 Créer dans la console Wasabi un sous-utilisateur dédié, par exemple `kura-ctl`,
 avec un accès programmatique uniquement (pas d'accès à la console web), puis lui
@@ -109,6 +123,229 @@ attacher :
 Aucune de ces actions ne donne accès au contenu des sauvegardes (pas de
 `s3:GetObject`, pas de `s3:ListBucket`). Si une permission manque, la page du
 bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
+
+### `kura-ctl-admin` (lot 2)
+
+1. *Policies → Create Policy* : nom `kura-ctl-admin`, contenu ci-dessous (aussi affiché dans
+   *Réglages*).
+2. *Users → Create User* : `kura-ctl-admin`, accès programmatique seulement ; lui attacher
+   cette stratégie et la stratégie gérée `WasabiBucketStatsAccess`.
+3. Dans la console : *Réglages → Clé d'administration*, saisir sa clé. Supprimer ensuite la
+   clé en lecture seule dans Wasabi.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SeConnaitre",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetUser",
+        "iam:ListUsers"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Sid": "GererLesUtilisateursDesPostes",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateUser",
+        "iam:GetUser",
+        "iam:PutUserPolicy",
+        "iam:GetUserPolicy",
+        "iam:ListUserPolicies",
+        "iam:CreateAccessKey",
+        "iam:ListAccessKeys",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:GetAccessKeyLastUsed"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:user/kura-*"
+      ]
+    },
+    {
+      "Sid": "JamaisSurLaConsoleElleMeme",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:UpdateUser",
+        "iam:PutUserPolicy",
+        "iam:DeleteUserPolicy",
+        "iam:AttachUserPolicy",
+        "iam:DetachUserPolicy",
+        "iam:CreateAccessKey",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:AddUserToGroup"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:user/kura-ctl*"
+      ]
+    },
+    {
+      "Sid": "ReglerLesBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "s3:CreateBucket",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:GetBucketTagging",
+        "s3:PutBucketTagging"
+      ],
+      "Resource": [
+        "*"
+      ]
+    }
+  ]
+}
+```
+
+- Aucun accès au contenu des sauvegardes (ni `GetObject`, ni `DeleteObject…`), aucun
+  contournement de rétention (`BypassGovernanceRetention`).
+- Droits IAM limités aux utilisateurs `kura-*` (les postes) ; refus explicite sur `kura-ctl*` :
+  la console ne peut ni modifier ses propres droits ni se créer de clé.
+- `CreateBucket` sert au lot 4.
+
+## Sécuriser un bucket existant (lot 2)
+
+Sur la page d'un bucket, section *Sécuriser le bucket* :
+
+| Réglage | Ce qui est écrit |
+| --- | --- |
+| Stratégie de bucket | refus du HTTP non chiffré ; refus, à tous sauf `kura-ctl-admin` et au compte racine, de supprimer une version, de contourner une rétention, de changer le cycle de vie, le versioning ou l'Object Lock. La stratégie elle-même reste modifiable : la console ne peut pas s'enfermer dehors. |
+| Cycle de vie | anciennes versions supprimées après 90 jours, marqueurs orphelins nettoyés, envois interrompus abandonnés après 7 jours ; les versions courantes ne sont jamais expirées |
+| Rétention par défaut | gouvernance 30 jours, si l'Object Lock est actif (il ne s'active qu'à la création du bucket) |
+
+L'aperçu montre le réglage actuel et le nouveau : chaque écriture **remplace** le réglage
+entier (une stratégie qui accordait autre chose est remplacée). Exemple de stratégie générée :
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "HTTPSObligatoire",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "*"
+      },
+      "Action": [
+        "s3:*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-srv01",
+        "arn:aws:s3:::acme-srv01/*"
+      ],
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    },
+    {
+      "Sid": "ReserveALaConsole",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "*"
+      },
+      "Action": [
+        "s3:DeleteObjectVersion",
+        "s3:BypassGovernanceRetention",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketObjectLockConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-srv01",
+        "arn:aws:s3:::acme-srv01/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::100000000042:user/kura-ctl-admin",
+            "arn:aws:iam::100000000042:root"
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+## Clé d'un poste et paquet `.kura` (lot 2)
+
+*Créer une clé et un paquet* crée si besoin l'utilisateur `kura-<client>-<poste>` avec la
+stratégie ci-dessous (son seul bucket, sans droit de supprimer une version), puis une clé
+d'accès, remise dans un paquet `.kura` chiffré (AES-256-GCM, PBKDF2-SHA256) :
+
+- le **mot de passe** du paquet s'affiche une seule fois, à transmettre par un autre chemin
+  que le fichier ;
+- le **fichier** se télécharge une seule fois, dans les 30 minutes, et s'ouvre sur le poste
+  pendant 72 heures ; la console ne garde pas le secret ;
+- sur le poste, `kura-agent import fichier.kura` (kura-agent 0.5 ou plus récent, console
+  d'administration) essaie la clé auprès de Wasabi avant de remplacer l'ancienne ;
+- une fois la sauvegarde suivante réussie, *Confirmer l'installation* : la console désactive
+  les clés qu'elle avait créées avant pour ce poste ; une clé désactivée reste réactivable,
+  et devient supprimable après 7 jours. Une ancienne clé créée à la main dans Wasabi se
+  désactive dans la console Wasabi (la console n'a de droits que sur les utilisateurs `kura-*`).
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListerSonBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:ListBucketVersions",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-srv01"
+      ]
+    },
+    {
+      "Sid": "LireEcrireSonBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-srv01/*"
+      ]
+    }
+  ]
+}
+```
+
+La vue d'ensemble signale une clé remise depuis plus de 3 jours sans confirmation, et une
+clé de plus de 90 jours (rotation due).
+
+**Limite du mode gouvernance.** La console peut modifier les stratégies : compromise, elle
+pourrait finir par s'ouvrir le droit de supprimer des versions verrouillées en gouvernance.
+Seul le mode conformité (aucun contournement possible, compte racine compris) protège aussi
+contre la console elle-même, au prix de ne jamais pouvoir effacer avant échéance.
 
 ## Sécurité
 

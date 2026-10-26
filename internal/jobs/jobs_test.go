@@ -213,3 +213,26 @@ func TestCollectErrorRecorded(t *testing.T) {
 		t.Fatalf("erreur non effacée : %q", b.CollectError)
 	}
 }
+
+func TestKeyAlerts(t *testing.T) {
+	st, _, _, _ := setup(t)
+	ctx := context.Background()
+	st.AddKey(ctx, store.AccessKey{ID: "AKIDOLD", UserName: "kura-acme-srv01", Bucket: "acme-srv01", CredentialName: "wasabi"})
+	ov, _ := BuildOverview(ctx, st, Pricing{PerTB: 7}, time.Now().AddDate(0, 0, 4)) // le magasin date à l'heure réelle
+	found := false
+	for _, a := range ov.Alerts {
+		found = found || strings.Contains(a.Message, "installation jamais confirmée")
+	}
+	if !found {
+		t.Fatalf("alerte de confirmation absente : %+v", ov.Alerts)
+	}
+	st.SetKeyStatus(ctx, "AKIDOLD", store.KeyInstalled)
+	ov, _ = BuildOverview(ctx, st, Pricing{PerTB: 7}, time.Now().AddDate(0, 0, 91))
+	found = false
+	for _, a := range ov.Alerts {
+		found = found || strings.Contains(a.Message, "rotation due")
+	}
+	if !found {
+		t.Fatalf("alerte de rotation absente : %+v", ov.Alerts)
+	}
+}

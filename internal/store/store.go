@@ -53,6 +53,9 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// SetClock remplace l'horloge des dates enregistrées (tests).
+func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
 // Close ferme la base.
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -107,6 +110,21 @@ var migrations = []string{
 	// 2 : résultat de la dernière collecte de l'usage, affiché sur la page du bucket.
 	`ALTER TABLE buckets ADD COLUMN collected_at TEXT;
 	ALTER TABLE buckets ADD COLUMN collect_error TEXT NOT NULL DEFAULT '';`,
+	// 3 : clés d'accès des postes créées par la console (métadonnées seulement :
+	// le secret ne quitte la console que dans le paquet .kura).
+	`CREATE TABLE access_keys (
+		id              TEXT PRIMARY KEY,
+		user_name       TEXT NOT NULL,
+		bucket          TEXT NOT NULL REFERENCES buckets(name),
+		credential_name TEXT NOT NULL,
+		status          TEXT NOT NULL,
+		created_at      TEXT NOT NULL,
+		downloaded_at   TEXT,
+		installed_at    TEXT,
+		deactivated_at  TEXT,
+		deleted_at      TEXT
+	);
+	CREATE INDEX access_keys_bucket ON access_keys(bucket);`,
 }
 
 func (s *Store) migrate() error {
@@ -418,4 +436,106 @@ func (s *Store) UsageRange(ctx context.Context, bucket, from, to string) ([]Usag
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// --- clés d'accès des postes -------------------------------------------------------
+
+// États d'une clé de poste.
+const (
+	KeyIssued      = "remise"     // créée, paquet généré, installation non confirmée
+	KeyInstalled   = "installee"  // installation confirmée par l'éditeur
+	KeyDeactivated = "desactivee" // désactivée (rotation ou révocation)
+	KeyDeleted     = "supprimee"
+)
+
+// AccessKey est une clé de poste créée par la console.
+type AccessKey struct {
+	ID             string
+	UserName       string
+	Bucket         string
+	CredentialName string
+	Status         string
+	CreatedAt      time.Time
+	DownloadedAt   time.Time
+	InstalledAt    time.Time
+	DeactivatedAt  time.Time
+	DeletedAt      time.Time
+}
+
+// AddKey enregistre une clé créée.
+func (s *Store) AddKey(ctx context.Context, k AccessKey) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO access_keys (id, user_name, bucket, credential_name, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		k.ID, k.UserName, k.Bucket, k.CredentialName, KeyIssued, ts(s.now()))
+	return err
+}
+
+// Keys renvoie les clés d'un bucket ("" : toutes), les plus récentes d'abord.
+func (s *Store) Keys(ctx context.Context, bucket string) ([]AccessKey, error) {
+	q := `SELECT id, user_name, bucket, credential_name, status, created_at, COALESCE(downloaded_at, ''),
+		COALESCE(installed_at, ''), COALESCE(deactivated_at, ''), COALESCE(deleted_at, '') FROM access_keys`
+	var args []any
+	if bucket != "" {
+		q += ` WHERE bucket = ?`
+		args = append(args, bucket)
+	}
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY created_at DESC, id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AccessKey
+	for rows.Next() {
+		var k AccessKey
+		var c, dl, in, de, del string
+		if err := rows.Scan(&k.ID, &k.UserName, &k.Bucket, &k.CredentialName, &k.Status, &c, &dl, &in, &de, &del); err != nil {
+			return nil, err
+		}
+		k.CreatedAt, k.DownloadedAt, k.InstalledAt, k.DeactivatedAt, k.DeletedAt = parseTS(c), parseTS(dl), parseTS(in), parseTS(de), parseTS(del)
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// Key renvoie une clé.
+func (s *Store) Key(ctx context.Context, id string) (AccessKey, error) {
+	all, err := s.Keys(ctx, "")
+	if err != nil {
+		return AccessKey{}, err
+	}
+	for _, k := range all {
+		if k.ID == id {
+			return k, nil
+		}
+	}
+	return AccessKey{}, ErrNotFound
+}
+
+// MarkKeyDownloaded note le téléchargement du paquet.
+func (s *Store) MarkKeyDownloaded(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE access_keys SET downloaded_at = ? WHERE id = ?`, ts(s.now()), id)
+	return err
+}
+
+// SetKeyStatus change l'état d'une clé et date le changement.
+func (s *Store) SetKeyStatus(ctx context.Context, id, status string) error {
+	col := map[string]string{KeyInstalled: "installed_at", KeyDeactivated: "deactivated_at", KeyDeleted: "deleted_at"}[status]
+	q := `UPDATE access_keys SET status = ?`
+	if col != "" {
+		q += `, ` + col + ` = ?`
+	}
+	args := []any{status}
+	if col != "" {
+		args = append(args, ts(s.now()))
+	}
+	if status == KeyInstalled || status == KeyIssued { // réactivation : plus désactivée
+		q += `, deactivated_at = NULL`
+	}
+	res, err := s.db.ExecContext(ctx, q+` WHERE id = ?`, append(args, id)...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

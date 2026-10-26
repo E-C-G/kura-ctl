@@ -68,6 +68,12 @@ const (
 	GrowthGrace     = 7
 )
 
+// Échéances des clés de poste.
+const (
+	KeyConfirmAfter = 3 * 24 * time.Hour  // clé remise sans confirmation d'installation
+	KeyRotateAfter  = 90 * 24 * time.Hour // rotation recommandée
+)
+
 // BuildOverview calcule la vue d'ensemble à partir de la base.
 //
 // Coût, selon la formule publiée par Wasabi : chaque jour,
@@ -161,6 +167,21 @@ func BuildOverview(ctx context.Context, st *store.Store, p Pricing, now time.Tim
 		}
 		ov.MonthCost += bs.MonthCost
 		ov.Buckets = append(ov.Buckets, bs)
+	}
+	// Clés des postes : installation à confirmer, rotation due (specs §6).
+	keys, err := st.Keys(ctx, "")
+	if err != nil {
+		return ov, err
+	}
+	for _, k := range keys {
+		switch {
+		case k.Status == store.KeyIssued && now.Sub(k.CreatedAt) > KeyConfirmAfter:
+			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.Medium, Bucket: k.Bucket, Message: fmt.Sprintf(
+				"clé %s remise le %s, installation jamais confirmée (à confirmer, ou à désactiver si le paquet est perdu)", k.ID, k.CreatedAt.Format("2006-01-02"))})
+		case k.Status == store.KeyInstalled && now.Sub(k.CreatedAt) > KeyRotateAfter:
+			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.Medium, Bucket: k.Bucket, Message: fmt.Sprintf(
+				"clé %s créée le %s : rotation due (plus de %d jours)", k.ID, k.CreatedAt.Format("2006-01-02"), int(KeyRotateAfter.Hours()/24))})
+		}
 	}
 	var billed, real float64
 	for _, d := range perDay {

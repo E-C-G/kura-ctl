@@ -36,6 +36,28 @@ const f = process.argv[2];
     await page.fill('input[name=price]', '7,50');
     await Promise.all([page.waitForNavigation(), page.click('form[action="/settings"] button')]);
     console.log('7. réglages', (await page.textContent('body')).includes('Réglages enregistrés'));
+    // Lot 2 : correction de la stratégie, clé du poste, paquet .kura.
+    await page.goto(base + 'buckets/acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Voir et appliquer la stratégie du modèle')]);
+    console.log('8. aperçu stratégie', (await page.textContent('pre.doc >> nth=1')).includes('kura-ctl-admin'));
+    await page.fill('input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Appliquer chez Wasabi')]);
+    console.log('9. stratégie appliquée', (await page.textContent('body')).includes('appliqué et vérifié par relecture'));
+    await page.fill('form[action="/buckets/acme-srv01/cles"] input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Créer une clé et un paquet')]);
+    const pw = (await page.textContent('strong.password')).trim();
+    console.log('10. mot de passe affiché', /^[A-Z0-9]{4}(-[A-Z0-9]{4}){4}$/.test(pw));
+    await page.screenshot({ path: f + '-paquet.png', fullPage: true });
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('a.button')]);
+    const file = f + '.kura';
+    await dl.saveAs(file);
+    const pk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    console.log('11. paquet téléchargé', dl.suggestedFilename(), pk.format, !fs.readFileSync(file, 'utf8').includes('secret-poste'));
+    await page.goto(base + 'buckets/acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Confirmer l\'installation')]);
+    console.log('12. installation confirmée', (await page.textContent('body')).includes('Installation confirmée'));
+    await page.screenshot({ path: f + '-bucket.png', fullPage: true });
+    fs.writeFileSync(f + '.pw', pw);
   } catch (e) {
     console.log('ÉCHEC', e.message, page.url());
     console.log((await page.textContent('body')).slice(0, 400));

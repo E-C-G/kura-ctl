@@ -1,5 +1,27 @@
-{{define "content"}}
+{{define "content"}}{{$a := .Data.Admin}}
 <h1>Réglages</h1>
+<section>
+<h2>Clé d'administration Wasabi</h2>
+{{if $a.Admin.OK}}<p><span class="badge ok">écritures possibles</span> Utilisateur <code>{{$a.Admin.Identity.UserName}}</code>, compte <code>{{$a.Admin.Identity.AccountID}}</code>.</p>
+{{else}}<p class="flash">{{$a.Admin.Reason}}</p>{{end}}
+<details>
+  <summary>Créer l'utilisateur <code>kura-ctl-admin</code> dans la console Wasabi</summary>
+  <ol>
+    <li><em>Policies → Create Policy</em> : nom <code>kura-ctl-admin</code>, contenu ci-dessous (stratégie IAM : pas de champ <code>Principal</code>).</li>
+    <li><em>Users → Create User</em> : <code>kura-ctl-admin</code>, accès programmatique seulement ; lui attacher la stratégie <code>kura-ctl-admin</code> et la stratégie gérée <code>WasabiBucketStatsAccess</code>.</li>
+    <li>Saisir ici sa clé d'accès, puis supprimer l'ancienne clé en lecture seule de la console.</li>
+  </ol>
+  <pre class="doc">{{$a.Policy}}</pre>
+  <p class="hint">Aucun droit sur le contenu des sauvegardes ni de contournement de rétention ; droits IAM limités aux utilisateurs <code>kura-*</code>, jamais sur <code>kura-ctl*</code> (la console ne peut pas s'accorder plus de droits).</p>
+</details>
+<form method="post" action="/settings/admin-key" autocomplete="off" class="narrow">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Mot de passe maître<input type="password" name="current" required autocomplete="current-password"></label>
+  <label>Nouvel identifiant de clé (Access Key ID)<input name="access_key_id" required autocomplete="off" spellcheck="false"></label>
+  <label>Nouvelle clé secrète (Secret Access Key)<input type="password" name="secret_access_key" required autocomplete="off"></label>
+  <button>Remplacer la clé d'administration</button>
+</form>
+</section>
 <section class="narrow">
 <h2>Tarif Wasabi</h2>
 <form method="post" action="/settings">

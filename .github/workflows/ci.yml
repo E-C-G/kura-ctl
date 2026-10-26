@@ -41,8 +41,17 @@ jobs:
                 echo "::notice title=$f généré ${part##*.}::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' "$part")"
               done
             done
-          else
-            go mod tidy -diff
+          elif ! go mod tidy -diff > /tmp/tidy.diff; then
+            # Dépendances changées : go.mod et go.sum à jour affichés en annotations.
+            echo "::error title=go.mod/go.sum à mettre à jour::lancer 'go mod tidy' et commiter (contenu attendu en annotations)"
+            go mod tidy
+            for f in go.mod go.sum; do
+              split -l 25 -d "$f" "/tmp/$f.part."
+              for part in /tmp/$f.part.*; do
+                echo "::notice title=$f généré ${part##*.}::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' "$part")"
+              done
+            done
+            exit 1
           fi
           go mod verify
 

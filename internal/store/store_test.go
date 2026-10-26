@@ -114,3 +114,30 @@ func TestSettings(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+func TestAccessKeys(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	st.EnsureClient(ctx, Client{Code: "acme", Name: "Acme"})
+	st.ImportBucket(ctx, Bucket{Name: "acme-srv01", Region: "eu-central-1", ClientCode: "acme"})
+	if err := st.AddKey(ctx, AccessKey{ID: "AKID1", UserName: "kura-acme-srv01", Bucket: "acme-srv01", CredentialName: "wasabi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddKey(ctx, AccessKey{ID: "AKID2", UserName: "kura-acme-srv01", Bucket: "inconnu", CredentialName: "wasabi"}); err == nil {
+		t.Fatal("clé d'un bucket inconnu acceptée")
+	}
+	st.MarkKeyDownloaded(ctx, "AKID1")
+	st.SetKeyStatus(ctx, "AKID1", KeyInstalled)
+	st.SetKeyStatus(ctx, "AKID1", KeyDeactivated)
+	k, err := st.Key(ctx, "AKID1")
+	if err != nil || k.Status != KeyDeactivated || k.DownloadedAt.IsZero() || k.InstalledAt.IsZero() || k.DeactivatedAt.IsZero() {
+		t.Fatalf("clé : %+v %v", k, err)
+	}
+	st.SetKeyStatus(ctx, "AKID1", KeyInstalled) // réactivée
+	if k, _ = st.Key(ctx, "AKID1"); !k.DeactivatedAt.IsZero() {
+		t.Fatal("date de désactivation conservée après réactivation")
+	}
+	if err := st.SetKeyStatus(ctx, "AKIDX", KeyInstalled); err != ErrNotFound {
+		t.Fatalf("clé inconnue : %v", err)
+	}
+}

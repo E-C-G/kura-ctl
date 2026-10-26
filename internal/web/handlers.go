@@ -179,8 +179,13 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 	// La clé doit fonctionner avant d'être rangée : liste des buckets (lecture seule).
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if _, err := s.NewAccount(wasabi.Keys{AccessKeyID: k.AccessKeyID, SecretAccessKey: k.SecretAccessKey}).ListBuckets(ctx); err != nil {
+	acc := s.NewAccount(wasabi.Keys{AccessKeyID: k.AccessKeyID, SecretAccessKey: k.SecretAccessKey})
+	if _, err := acc.ListBuckets(ctx); err != nil {
 		again("Wasabi refuse cette clé : " + err.Error())
+		return
+	}
+	if id, err := acc.Identity(ctx); err == nil && id.Root() {
+		again("C'est la clé du compte racine : la console ne doit jamais la détenir (voir le README).")
 		return
 	}
 	if err := s.Vault.Store(pw, k); err != nil {
@@ -400,6 +405,8 @@ type bucketData struct {
 	jobs.BucketSummary
 	Recent  []store.Usage
 	Pricing jobs.Pricing
+	Keys    keysView
+	Fixes   map[string]bool // corrections utiles : strategie, cycle-de-vie, retention
 }
 
 func (s *Server) bucketPage(w http.ResponseWriter, r *http.Request) {
@@ -422,6 +429,17 @@ func (s *Server) bucketPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.Pricing = s.pricing(ctx)
+	d.Keys = s.keysFor(ctx, s.current(), d.Bucket)
+	d.Fixes = map[string]bool{}
+	for _, dev := range d.Deviations {
+		for what, codes := range fixedCodes {
+			for _, c := range codes {
+				if dev.Code == c {
+					d.Fixes[what] = true
+				}
+			}
+		}
+	}
 	now := s.now().UTC()
 	d.Recent, _ = s.Store.UsageRange(ctx, name, now.AddDate(0, 0, -30).Format("2006-01-02"), now.Format("2006-01-02"))
 	sort.Slice(d.Recent, func(i, j int) bool { return d.Recent[i].Day > d.Recent[j].Day })
@@ -488,8 +506,17 @@ func (s *Server) auditPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "audit", view{Title: "Journal d'audit", Nav: "audit", Data: log})
 }
 
+type settingsView struct {
+	jobs.Pricing
+	Admin adminSettings
+}
+
+func (s *Server) settingsData(ctx context.Context) settingsView {
+	return settingsView{Pricing: s.pricing(ctx), Admin: s.adminSettings(ctx)}
+}
+
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Data: s.pricing(r.Context())})
+	s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Data: s.settingsData(r.Context())})
 }
 
 func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
@@ -497,7 +524,7 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 	price := strings.Replace(trim(r, "price"), ",", ".", 1)
 	cur := trim(r, "currency")
 	if f, err := strconv.ParseFloat(price, 64); err != nil || f <= 0 || f > 1000 || cur == "" || len(cur) > 5 {
-		s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Error: "Prix ou devise invalide.", Data: s.pricing(ctx)})
+		s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Error: "Prix ou devise invalide.", Data: s.settingsData(ctx)})
 		return
 	}
 	_ = s.Store.SetSetting(ctx, setPrice, price)
@@ -510,7 +537,7 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) passwordSubmit(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	again := func(msg string) {
-		s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Error: msg, Data: s.pricing(ctx)})
+		s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Error: msg, Data: s.settingsData(ctx)})
 	}
 	k, err := s.tryPassword(r.PostFormValue("current"))
 	if errors.Is(err, errThrottled) {

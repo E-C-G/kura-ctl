@@ -1,0 +1,24 @@
+{{define "content"}}{{$d := .Data}}
+<p><a href="/buckets/{{$d.Bucket.Name}}">← {{$d.Bucket.Name}}</a></p>
+<h1>Paquet « clé seule » <span class="muted">· {{$d.Bucket.Name}}</span></h1>
+<p>Clé <code>{{$d.KeyID}}</code> créée pour l'utilisateur <code>{{$d.UserName}}</code>, limitée au bucket <code>{{$d.Bucket.Name}}</code>.</p>
+
+<section class="tiles">
+  <div class="tile"><span>Mot de passe du paquet (affiché une seule fois)</span><strong class="password">{{$d.Password}}</strong>
+    <em>À noter ou à copier maintenant : la console ne le conserve pas. Casse et tirets indifférents.</em></div>
+  <div class="tile"><span>Paquet chiffré</span>
+    <a class="button" href="{{$d.URL}}" hx-boost="false" download="{{$d.File}}">Télécharger {{$d.File}}</a>
+    <em>Téléchargeable une seule fois, dans les 30 minutes. Ouvrable sur le poste jusqu'au {{datetime $d.Expires}}.</em></div>
+</section>
+
+<h2>Sur le poste</h2>
+<ol>
+  <li>Copier le fichier sur le poste (le mot de passe, lui, par un autre chemin).</li>
+  <li>Dans une invite de commandes <strong>en tant qu'administrateur</strong> (kura-agent 0.5 ou plus récent) :<br>
+    <code>kura-agent import C:\chemin\vers\{{$d.File}}</code><br>
+    <span class="hint">L'import essaie la clé auprès de Wasabi avant de remplacer l'ancienne (secret <code>{{$d.CredName}}</code>), puis supprime le fichier.</span></li>
+  <li>Attendre la sauvegarde suivante (ou « Sauvegarder maintenant » depuis l'icône) et vérifier qu'elle réussit.</li>
+  <li>Revenir sur la page du bucket et cliquer sur <strong>Confirmer l'installation</strong> : la console désactive alors les anciennes clés qu'elle a créées.</li>
+</ol>
+<p class="hint">Paquet perdu ou mot de passe oublié : désactiver cette clé sur la page du bucket et en créer une nouvelle.</p>
+{{end}}

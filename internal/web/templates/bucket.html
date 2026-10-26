@@ -26,7 +26,7 @@
     {{range $d.Deviations}}
       <div class="dev {{sevclass .Severity}}"><span class="badge {{sevclass .Severity}}">{{.Severity}}</span> {{.Message}}<div class="hint">{{.Fix}}</div></div>
     {{else}}<p><span class="badge ok">conforme</span> Aucun écart.</p>{{end}}
-    <p class="hint">Relevé le {{datetime $d.AuditedAt}}. Les corrections viendront au lot 2 (stratégie, cycle de vie) et au lot 4 (bucket neuf avec Object Lock).</p>
+    <p class="hint">Relevé le {{datetime $d.AuditedAt}}. Ce qui se corrige après coup se règle dans « Sécuriser le bucket » ci-dessous ; Object Lock demande un bucket neuf (lot 4).</p>
     {{end}}
   </div>
   <div>
@@ -46,6 +46,50 @@
     </table>
     {{else}}<p class="muted">—</p>{{end}}
   </div>
+</section>
+
+<section>
+  <h2>Sécuriser le bucket</h2>
+  {{if not $d.Keys.Admin.OK}}<p class="flash">{{$d.Keys.Admin.Reason}}</p>
+  {{else}}
+  <table class="kv">
+    <tr><th>Stratégie de bucket</th><td>{{if index $d.Fixes "strategie"}}<a href="/buckets/{{$d.Name}}/corriger/strategie">Voir et appliquer la stratégie du modèle</a>{{else}}<span class="badge ok">conforme</span> <a class="muted" href="/buckets/{{$d.Name}}/corriger/strategie">réappliquer</a>{{end}}</td></tr>
+    <tr><th>Cycle de vie</th><td>{{if index $d.Fixes "cycle-de-vie"}}<a href="/buckets/{{$d.Name}}/corriger/cycle-de-vie">Voir et appliquer le cycle de vie du modèle</a>{{else}}<span class="badge ok">conforme</span>{{end}}</td></tr>
+    <tr><th>Rétention par défaut</th><td>{{if index $d.Fixes "retention"}}<a href="/buckets/{{$d.Name}}/corriger/retention">Voir et appliquer la rétention du modèle</a>{{else if and $d.Settings $d.Settings.ObjectLock.Enabled}}<span class="badge ok">conforme</span>{{else}}<span class="muted">Object Lock absent : bucket neuf nécessaire (lot 4)</span>{{end}}</td></tr>
+  </table>
+  {{end}}
+
+  <h2>Clés du poste</h2>
+  {{with $d.Keys.Error}}<p class="flash error">{{.}}</p>{{end}}
+  {{if $d.Keys.Keys}}
+  <table>
+    <thead><tr><th>Clé</th><th>Secret sur le poste</th><th>Dans la console</th><th>Chez Wasabi</th><th>Dernière utilisation</th><th>Créée</th><th>Actions</th></tr></thead>
+    <tbody>{{range $d.Keys.Keys}}
+    <tr><td><code>{{.ID}}</code><br><span class="hint">{{.UserName}}</span></td><td>{{.CredentialName}}</td>
+      <td>{{if eq .Status "remise"}}remise{{if .DownloadedAt.IsZero}} <span class="sev-haute">(paquet non téléchargé)</span>{{end}}, installation à confirmer
+        {{else if eq .Status "installee"}}<span class="ok">installée</span> le {{date .InstalledAt}}
+        {{else if eq .Status "desactivee"}}désactivée le {{date .DeactivatedAt}}
+        {{else}}supprimée le {{date .DeletedAt}}{{end}}</td>
+      <td>{{or .Live "—"}}</td><td>{{if .LastUsed.IsZero}}<span class="muted">jamais</span>{{else}}{{datetime .LastUsed}}{{end}}</td><td>{{date .CreatedAt}}</td>
+      <td><div class="actions">
+        {{if eq .Status "remise"}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/installee"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="small">Confirmer l'installation</button></form>{{end}}
+        {{if or (eq .Status "remise") (eq .Status "installee")}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/desactiver" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><button class="small danger">Désactiver</button></form>{{end}}
+        {{if eq .Status "desactivee"}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/reactiver" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><button class="small ghost">Réactiver</button></form>
+          {{if .CanDelete}}<form method="post" action="/buckets/{{$d.Name}}/cles/{{.ID}}/supprimer" autocomplete="off"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="confirm" required placeholder="nom du bucket" aria-label="Nom du bucket pour confirmer"><button class="small danger">Supprimer</button></form>
+          {{else}}<span class="hint">supprimable le {{date .DeleteOn}}</span>{{end}}{{end}}
+      </div></td></tr>
+    {{end}}</tbody>
+  </table>
+  {{else}}<p class="muted">Aucune clé créée par la console pour ce poste.</p>{{end}}
+  {{if $d.Keys.Admin.OK}}
+  <form method="post" action="/buckets/{{$d.Name}}/cles" autocomplete="off" class="narrow">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p class="hint">Crée (si besoin) l'utilisateur <code>{{$d.Keys.UserName}}</code>, limité à ce bucket et sans droit de supprimer une version, puis une clé et son paquet « clé seule » à importer sur le poste avec <code>kura-agent import</code>.</p>
+    <label>Nom du secret sur le poste (<code>profile.aws_credentials: credential:…</code>)<input name="credential" value="wasabi" required pattern="[A-Za-z0-9._\-]{1,40}"></label>
+    <label>Retaper le nom du bucket pour confirmer<input name="confirm" required autocomplete="off" spellcheck="false" placeholder="{{$d.Name}}"></label>
+    <button>Créer une clé et un paquet</button>
+  </form>
+  {{end}}
 </section>
 
 <section>
