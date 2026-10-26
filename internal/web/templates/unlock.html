@@ -1,0 +1,10 @@
+{{define "content"}}
+<section class="narrow">
+<h1>Déverrouiller la console</h1>
+<form method="post" action="/unlock" hx-boost="false">
+  <label>Mot de passe maître<input type="password" name="password" required autofocus autocomplete="current-password"></label>
+  <button>Déverrouiller</button>
+</form>
+<p class="hint">Mot de passe oublié : relancer <code>kura-ctl --reset</code>, puis ressaisir la clé d'administration. La base (buckets, usage, journal) est conservée.</p>
+</section>
+{{end}}

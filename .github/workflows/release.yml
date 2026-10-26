@@ -1,0 +1,82 @@
+name: Release
+
+# Publier une version :  git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag existant à publier (ex. v0.1.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tests, builds, publication
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Version
+        id: v
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag « $TAG » invalide : attendu vMAJEUR.MINEUR.CORRECTIF (ex. v0.1.0)"
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Tests
+        run: |
+          go mod tidy -diff && go mod verify
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Builds et archives
+        shell: bash
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          mkdir -p dist
+          for t in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64; do
+            os="${t%/*}"; arch="${t#*/}"; ext=""; [ "$os" = windows ] && ext=".exe"
+            name="kura-ctl_${v}_${os}_${arch}"
+            mkdir -p "pkg/$name"
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=$v -X main.commit=${{ steps.v.outputs.commit }}" \
+              -o "pkg/$name/kura-ctl${ext}" ./cmd/kura-ctl
+            cp README.md THIRD_PARTY_NOTICES.md "pkg/$name/"
+            if [ "$os" = windows ]; then
+              (cd pkg && zip -qr "../dist/$name.zip" "$name")
+            else
+              tar -C pkg -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          out="$(./pkg/kura-ctl_${v}_linux_amd64/kura-ctl --version)"
+          [[ "$out" == *"$v"* ]] || { echo "::error::version absente du binaire"; exit 1; }
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "kura-ctl ${{ steps.v.outputs.version }}")
+          [[ "${{ steps.v.outputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
+          gh release create "$TAG" "${flags[@]}" dist/*
+        shell: bash

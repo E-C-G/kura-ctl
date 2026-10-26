@@ -1,0 +1,33 @@
+{{define "layout.html"}}<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"historyCacheSize":0}'>
+<title>{{.Title}} – Kura</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/chart.umd.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body hx-boost="true"{{if .CSRF}} hx-headers='{"X-CSRF-Token": "{{.CSRF}}"}'{{end}}>
+<header class="top">
+  <a class="brand" href="/">Kura <span>console</span></a>
+  {{if .CSRF}}
+  <nav>
+    <a href="/" {{if eq .Nav "overview"}}class="on"{{end}}>Vue d'ensemble</a>
+    <a href="/buckets" {{if eq .Nav "buckets"}}class="on"{{end}}>Buckets</a>
+    <a href="/audit" {{if eq .Nav "audit"}}class="on"{{end}}>Journal</a>
+    <a href="/settings" {{if eq .Nav "settings"}}class="on"{{end}}>Réglages</a>
+  </nav>
+  <form method="post" action="/lock" class="lock"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Verrouiller</button></form>
+  {{end}}
+</header>
+<main>
+  {{if .Error}}<p class="flash error">{{.Error}}</p>{{end}}
+  {{if .Notice}}<p class="flash ok">{{.Notice}}</p>{{end}}
+  {{template "content" .}}
+</main>
+<footer>kura-ctl {{.Version}} · écoute sur 127.0.0.1 uniquement · aucune écriture chez Wasabi dans cette version</footer>
+</body>
+</html>{{end}}

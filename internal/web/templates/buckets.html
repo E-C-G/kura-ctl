@@ -1,0 +1,35 @@
+{{define "content"}}{{$d := .Data}}{{$csrf := .CSRF}}
+<h1>Buckets</h1>
+<section>
+  <h2>Suivis par la console</h2>
+  {{if $d.Imported}}
+  <table>
+    <thead><tr><th>Client</th><th>Bucket</th><th>Poste</th><th>Région</th><th>Importé le</th><th>Relevé</th></tr></thead>
+    <tbody>{{range $d.Imported}}<tr><td>{{.ClientCode}}</td><td><a href="/buckets/{{.Name}}">{{.Name}}</a></td><td>{{or .Poste "—"}}</td><td>{{.Region}}</td><td>{{date .ImportedAt}}</td><td>{{datetime .AuditedAt}}</td></tr>{{end}}</tbody>
+  </table>
+  {{else}}<p class="muted">Aucun bucket importé pour l'instant.</p>{{end}}
+</section>
+<section>
+  <h2>Dans le compte Wasabi, pas encore suivis</h2>
+  {{with $d.ListError}}<p class="flash error">Liste des buckets impossible : {{.}}</p>{{end}}
+  <p class="hint">Importer un bucket ne modifie rien chez Wasabi : la console relève ses réglages et collecte son usage (un an d'historique).</p>
+  {{if $d.Available}}
+  <table class="import">
+    <thead><tr><th>Bucket</th><th>Région</th><th>Créé le</th><th>Client (code)</th><th>Nom du client</th><th>Poste</th><th></th></tr></thead>
+    <tbody>{{range $d.Available}}
+    <tr><td>{{.Name}}</td><td>{{.Region}}</td><td>{{date .Created}}</td>
+      <td colspan="4">
+        <form method="post" action="/buckets/import" class="inline">
+          <input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="bucket" value="{{.Name}}">
+          <input name="client_code" required pattern="[a-z0-9][a-z0-9-]{0,19}" value="{{index $d.SuggestFor .Name}}" list="clients" aria-label="Code client" placeholder="acme">
+          <input name="client_name" placeholder="Nom du client" aria-label="Nom du client">
+          <input name="poste" placeholder="SRV01" aria-label="Poste">
+          <button>Importer</button>
+        </form>
+      </td></tr>
+    {{end}}</tbody>
+  </table>
+  <datalist id="clients">{{range $d.Clients}}<option value="{{.Code}}">{{.Name}}</option>{{end}}</datalist>
+  {{else if not $d.ListError}}<p class="muted">Tous les buckets du compte sont suivis.</p>{{end}}
+</section>
+{{end}}

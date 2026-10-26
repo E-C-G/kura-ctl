@@ -1,0 +1,24 @@
+{{define "content"}}
+<section class="narrow">
+<h1>Première configuration</h1>
+<p>La console range la clé d'administration Wasabi dans le trousseau du système, chiffrée par un mot de passe maître. Il sera demandé à chaque ouverture ; <strong>il n'existe aucun moyen de le récupérer</strong>.</p>
+<form method="post" action="/setup" hx-boost="false" autocomplete="off">
+  <fieldset>
+    <legend>Mot de passe maître</legend>
+    <label>Mot de passe (12 caractères au moins)<input type="password" name="password" required minlength="12" autocomplete="new-password"></label>
+    <label>Confirmation<input type="password" name="password2" required minlength="12" autocomplete="new-password"></label>
+  </fieldset>
+  <fieldset>
+    <legend>Clé d'administration Wasabi</legend>
+    <p class="hint">Pour ce lot, une clé en <strong>lecture seule</strong> suffit : liste des buckets, lecture de leurs réglages et des statistiques (voir le README). Jamais la clé du compte racine.</p>
+    <label>Access Key ID<input name="access_key_id" required value="{{with .Data}}{{.AccessKeyID}}{{end}}" spellcheck="false"></label>
+    <label>Secret Access Key<input type="password" name="secret_access_key" required spellcheck="false"></label>
+  </fieldset>
+  <fieldset>
+    <legend>Tarif</legend>
+    <label>Prix au To et par mois (paiement à l'usage, en dollars)<input name="price" required value="{{with .Data}}{{.Price}}{{else}}6,99{{end}}" inputmode="decimal"></label>
+  </fieldset>
+  <button>Vérifier la clé et enregistrer</button>
+</form>
+</section>
+{{end}}

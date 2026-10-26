@@ -1,0 +1,7 @@
+/dist/
+*.exe
+*.test
+*.out
+*.db
+*.db-wal
+*.db-shm

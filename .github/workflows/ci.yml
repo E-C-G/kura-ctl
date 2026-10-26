@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Format, analyse statique pour les trois systèmes, tests avec le pilote SQLite de
+  # production (modernc, sans CGO) puis avec mattn, builds croisés sans CGO.
+  linux:
+    name: Linux · format, vet, tests, builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        shell: bash
+        run: |
+          if [ ! -f go.sum ]; then
+            echo "::warning title=go.sum absent::go.sum n'est pas commité ; il est généré pour ce build (modules vérifiés contre sum.golang.org). Lancer 'go mod tidy' et commiter go.sum."
+            go mod tidy
+            # Contenu généré, affiché en annotation pour pouvoir le commiter tel quel.
+            echo "::notice title=go.sum généré::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' go.sum)"
+          else
+            go mod tidy -diff
+          fi
+          go mod verify
+
+      - name: Format
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error title=gofmt::fichiers à formater avec gofmt -w :"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags mattn ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet ./...
+
+      - name: Tests (modernc, pilote de production)
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:' test.log | head -20 |
+              while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: Tests (mattn)
+        run: go test -tags mattn -count=1 ./internal/store/
+
+      - name: Builds
+        shell: bash
+        run: |
+          VERSION="0.0.0-dev+${GITHUB_SHA::7}"
+          for t in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64; do
+            os="${t%/*}"; arch="${t#*/}"; ext=""; [ "$os" = windows ] && ext=".exe"
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7}" \
+              -o "dist/kura-ctl_${os}_${arch}${ext}" ./cmd/kura-ctl
+          done
+          ls -l dist
+          ./dist/kura-ctl_linux_amd64 --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kura-ctl-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+
+  # Trousseau, chemins et SQLite sur les vrais systèmes de l'éditeur.
+  os:
+    name: ${{ matrix.os }} · tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        shell: bash
+        run: go mod tidy
+
+      - name: Tests
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 ./... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:' test.log | head -20 |
+              while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: Lancement du binaire
+        shell: bash
+        run: |
+          go build -o kura-ctl-bin ./cmd/kura-ctl
+          ./kura-ctl-bin --version

@@ -1,0 +1,59 @@
+{{define "content"}}{{$d := .Data}}{{$cur := $d.Pricing.Currency}}
+<div class="head">
+  <h1>{{$d.Name}} <span class="muted">· {{$d.ClientCode}}{{with $d.Poste}} · {{.}}{{end}} · {{$d.Region}}</span></h1>
+  <form method="post" action="/buckets/{{$d.Name}}/audit"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Relever les réglages</button></form>
+</div>
+
+{{with $d.GrowthAlerts}}<section class="alerts"><ul>{{range .}}<li class="sev-critique"><span class="badge sev-critique">critique</span> {{.Message}}</li>{{end}}</ul></section>{{end}}
+
+<section class="tiles">
+  <div class="tile"><span>Facturé (dernier jour)</span><strong>{{bytes $d.Last.PaddedBytes}}</strong></div>
+  <div class="tile"><span>Supprimé encore facturé</span><strong>{{bytes $d.Last.DeletedBytes}}</strong></div>
+  <div class="tile"><span>Objets</span><strong>{{$d.Last.Objects}}</strong></div>
+  <div class="tile"><span>Coût du mois (hors minimum du compte)</span><strong>{{money $d.MonthCost $cur}}</strong></div>
+</section>
+
+<section>
+  <h2>Usage sur 12 mois</h2>
+  <canvas class="chart" data-usage="/api/usage?days=365&amp;bucket={{$d.Name}}" height="90"></canvas>
+</section>
+
+<section class="cols">
+  <div>
+    <h2>Écarts au modèle « sauvegarde standard »</h2>
+    {{if $d.AuditedAt.IsZero}}<p class="muted">Réglages pas encore relevés.</p>
+    {{else}}
+    {{range $d.Deviations}}
+      <div class="dev {{sevclass .Severity}}"><span class="badge {{sevclass .Severity}}">{{.Severity}}</span> {{.Message}}<div class="hint">{{.Fix}}</div></div>
+    {{else}}<p><span class="badge ok">conforme</span> Aucun écart.</p>{{end}}
+    <p class="hint">Relevé le {{datetime $d.AuditedAt}}. Les corrections viendront au lot 2 (stratégie, cycle de vie) et au lot 4 (bucket neuf avec Object Lock).</p>
+    {{end}}
+  </div>
+  <div>
+    <h2>Réglages relevés</h2>
+    {{with $d.Settings}}
+    <table class="kv">
+      <tr><th>Versioning</th><td>{{.Versioning}}</td></tr>
+      <tr><th>Object Lock</th><td>{{retention .ObjectLock}}</td></tr>
+      <tr><th>Cycle de vie</th><td>{{if not .Lifecycle.Present}}aucune règle{{else}}
+        {{if .Lifecycle.NoncurrentDays}}anciennes versions : {{.Lifecycle.NoncurrentDays}} j<br>{{end}}
+        {{if .Lifecycle.ExpiresCurrentDays}}<strong class="sev-critique">versions courantes expirées</strong><br>{{end}}
+        {{if .Lifecycle.ExpiredDeleteMarker}}marqueurs orphelins nettoyés<br>{{end}}
+        {{if .Lifecycle.AbortMultipartDays}}envois interrompus : {{.Lifecycle.AbortMultipartDays}} j<br>{{end}}
+        {{range .Lifecycle.PartialRules}}<span class="muted">{{.}}</span><br>{{end}}{{end}}</td></tr>
+      <tr><th>Stratégie de bucket</th><td>{{if not .Policy.Present}}aucune{{else}}présente{{if .Policy.DenyVersionDeletion}} · interdit la suppression de versions{{end}}{{if .Policy.DenyInsecureTransport}} · HTTPS obligatoire{{end}}{{end}}</td></tr>
+      {{range $k, $v := .ReadErrors}}<tr><th>{{$k}}</th><td class="sev-haute">illisible : {{$v}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">—</p>{{end}}
+  </div>
+</section>
+
+<section>
+  <h2>30 derniers jours</h2>
+  <table>
+    <thead><tr><th>Jour</th><th class="num">Facturé</th><th class="num">Données</th><th class="num">Supprimé facturé</th><th class="num">Objets</th><th class="num">Envoyé</th></tr></thead>
+    <tbody>{{range $d.Recent}}<tr><td>{{.Day}}</td><td class="num">{{bytes .PaddedBytes}}</td><td class="num">{{bytes .ActiveBytes}}</td><td class="num">{{bytes .DeletedBytes}}</td><td class="num">{{.Objects}}</td><td class="num">{{bytes .UploadBytes}}</td></tr>
+    {{else}}<tr><td colspan="6" class="muted">Pas encore de statistique (collecte en cours, ou bucket créé aujourd'hui).</td></tr>{{end}}</tbody>
+  </table>
+</section>
+{{end}}

@@ -1,0 +1,9 @@
+{{define "content"}}
+<h1>Journal d'audit</h1>
+<p class="hint">Toute action de la console y est inscrite, sans jamais de secret. Le journal ne peut être ni modifié ni effacé.</p>
+<table>
+  <thead><tr><th>Quand</th><th>Qui</th><th>Action</th><th>Cible</th><th>Résultat</th><th>Détail</th></tr></thead>
+  <tbody>{{range .Data}}<tr><td>{{datetime .At}}</td><td>{{.Who}}</td><td>{{.Action}}</td><td>{{.Target}}</td><td>{{if eq .Result "ok"}}<span class="badge ok">ok</span>{{else}}<span class="badge sev-haute">{{.Result}}</span>{{end}}</td><td>{{.Detail}}</td></tr>
+  {{else}}<tr><td colspan="6" class="muted">Journal vide.</td></tr>{{end}}</tbody>
+</table>
+{{end}}

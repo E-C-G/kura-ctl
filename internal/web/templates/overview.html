@@ -1,0 +1,43 @@
+{{define "content"}}{{$d := .Data}}{{$cur := $d.Pricing.Currency}}
+<div class="head">
+  <h1>Vue d'ensemble</h1>
+  <form method="post" action="/refresh"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="back" value="/">
+    <button {{if $d.Report.Running}}disabled{{end}}>{{if $d.Report.Running}}Actualisation en cours…{{else}}Actualiser{{end}}</button></form>
+</div>
+<p class="muted">Dernière actualisation : {{if $d.Report.At.IsZero}}en cours{{else}}{{datetime $d.Report.At}}{{end}}{{with $d.Report.Errors}} · <span class="sev-haute">{{len .}} bucket(s) en erreur</span>{{end}}</p>
+
+{{with $d.Alerts}}
+<section class="alerts">
+  <h2>Alertes</h2>
+  <ul>{{range .}}<li class="{{sevclass .Severity}}"><span class="badge {{sevclass .Severity}}">{{.Severity}}</span> <a href="/buckets/{{.Bucket}}">{{.Bucket}}</a> : {{.Message}}</li>{{end}}</ul>
+</section>
+{{end}}
+
+<section class="tiles">
+  <div class="tile"><span>Stockage facturé (dernier jour)</span><strong>{{tb $d.TotalTB}} To</strong></div>
+  <div class="tile"><span>Moyenne du mois</span><strong>{{tb $d.MonthAvgTB}} To</strong></div>
+  <div class="tile"><span>Coût estimé {{$d.Month}}</span><strong>{{money $d.BilledCost $cur}}</strong>
+    {{if $d.MinimumHits}}<em>minimum facturé d'1 To ({{money $d.MonthCost $cur}} d'usage réel)</em>{{end}}</div>
+  <div class="tile"><span>Buckets suivis</span><strong>{{len $d.Buckets}}</strong></div>
+</section>
+
+<section>
+  <h2>Stockage facturé sur 12 mois</h2>
+  <canvas class="chart" data-usage="/api/usage?days=365" data-stack="bucket" height="90"></canvas>
+</section>
+
+<section>
+  <h2>Buckets</h2>
+  <table>
+    <thead><tr><th>Client</th><th>Bucket</th><th>Région</th><th class="num">Facturé</th><th class="num">Supprimé facturé</th><th class="num">Objets</th><th class="num">Coût du mois</th><th>Écarts au modèle</th><th>Dernier jour</th></tr></thead>
+    <tbody>{{range $d.Buckets}}
+      <tr><td>{{.ClientCode}}</td><td><a href="/buckets/{{.Name}}">{{.Name}}</a>{{with .Poste}} <span class="muted">({{.}})</span>{{end}}</td><td>{{.Region}}</td>
+        <td class="num">{{bytes .Last.PaddedBytes}}</td><td class="num">{{bytes .Last.DeletedBytes}}</td><td class="num">{{.Last.Objects}}</td>
+        <td class="num">{{money .MonthCost $cur}}</td>
+        <td>{{range $sev, $n := .BySeverity}}<span class="badge {{sevclass $sev}}">{{$n}} {{$sev}}</span> {{else}}{{if .AuditedAt.IsZero}}<span class="muted">pas encore relevé</span>{{else}}<span class="badge ok">conforme</span>{{end}}{{end}}</td>
+        <td>{{or .LastDay "—"}}</td></tr>
+    {{end}}</tbody>
+  </table>
+  <p class="hint">Coût estimé : moyenne journalière du mois (stockage facturé + supprimé encore facturé) × {{money $d.Pricing.PerTB $cur}} par To. Wasabi facture au moins 1 To par mois pour le compte.</p>
+</section>
+{{end}}

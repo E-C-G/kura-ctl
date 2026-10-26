@@ -1,0 +1,22 @@
+{{define "content"}}
+<h1>Réglages</h1>
+<section class="narrow">
+<h2>Tarif Wasabi</h2>
+<form method="post" action="/settings">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Prix au To et par mois<input name="price" required value="{{printf "%.2f" .Data.PerTB}}" inputmode="decimal"></label>
+  <label>Devise<input name="currency" required maxlength="5" value="{{.Data.Currency}}"></label>
+  <button>Enregistrer</button>
+</form>
+</section>
+<section class="narrow">
+<h2>Mot de passe maître</h2>
+<form method="post" action="/settings/password" hx-boost="false" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Mot de passe actuel<input type="password" name="current" required autocomplete="current-password"></label>
+  <label>Nouveau (12 caractères au moins)<input type="password" name="password" required minlength="12" autocomplete="new-password"></label>
+  <label>Confirmation<input type="password" name="password2" required minlength="12" autocomplete="new-password"></label>
+  <button>Changer</button>
+</form>
+</section>
+{{end}}
