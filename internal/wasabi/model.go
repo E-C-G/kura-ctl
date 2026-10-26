@@ -1,6 +1,9 @@
 package wasabi
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // Template est un modèle de réglages de bucket (specs §5).
 type Template struct {
@@ -49,17 +52,37 @@ type Deviation struct {
 	Fix      string `json:"fix"`
 }
 
+// known : réglage lu à ce relevé, ou valeur précédente conservée.
+func (s Settings) known(name string) bool {
+	if _, unread := s.ReadErrors[name]; !unread {
+		return true
+	}
+	_, kept := s.Kept[name]
+	return kept
+}
+
 // Audit compare les réglages relevés au modèle. L'ordre suit la gravité.
 func (t Template) Audit(s Settings) []Deviation {
 	var out []Deviation
 	add := func(code, sev, fix, format string, a ...any) {
 		out = append(out, Deviation{Code: code, Severity: sev, Fix: fix, Message: fmt.Sprintf(format, a...)})
 	}
-	for name, msg := range s.ReadErrors {
-		add("illisible-"+name, Info, FixKey, "%s illisible : %s", label(name), msg)
+	names := make([]string, 0, len(s.ReadErrors))
+	for name := range s.ReadErrors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		msg := s.ReadErrors[name]
+		if at, ok := s.Kept[name]; ok {
+			add("illisible-"+name, High, FixKey, "%s illisible : %s (écarts évalués sur la valeur lue le %s)",
+				label(name), msg, at.Format("2006-01-02"))
+		} else {
+			add("illisible-"+name, High, FixKey, "%s illisible : %s", label(name), msg)
+		}
 	}
 
-	if _, unread := s.ReadErrors["versioning"]; !unread && s.Versioning != "Enabled" {
+	if s.known("versioning") && s.Versioning != "Enabled" {
 		add("versioning", Critical, FixAfter,
 			"versioning %s : un fichier écrasé ou supprimé par la synchronisation n'est pas récupérable", lower(s.Versioning))
 	}
@@ -67,7 +90,7 @@ func (t Template) Audit(s Settings) []Deviation {
 		add("cycle-courantes", Critical, FixAfter,
 			"le cycle de vie expire les versions courantes : des fichiers toujours présents sur le poste disparaissent du bucket")
 	}
-	if _, unread := s.ReadErrors["object_lock"]; !unread {
+	if s.known("object_lock") {
 		switch {
 		case !s.ObjectLock.Enabled:
 			add("object-lock", High, FixNewBucket,
@@ -77,7 +100,7 @@ func (t Template) Audit(s Settings) []Deviation {
 				"rétention par défaut %s, attendu %s", retention(s.ObjectLock.Mode, s.ObjectLock.Days), retention(t.ObjectLockMode, t.ObjectLockDays))
 		}
 	}
-	if _, unread := s.ReadErrors["policy"]; !unread {
+	if s.known("policy") {
 		switch {
 		case !s.Policy.Present:
 			add("strategie", High, FixAfter, "pas de stratégie de bucket : aucune deuxième barrière si la stratégie d'une clé de poste est trop large")
@@ -90,7 +113,7 @@ func (t Template) Audit(s Settings) []Deviation {
 			}
 		}
 	}
-	if _, unread := s.ReadErrors["lifecycle"]; !unread {
+	if s.known("lifecycle") {
 		switch {
 		case s.Lifecycle.NoncurrentDays == 0:
 			add("cycle-versions", Medium, FixAfter, "anciennes versions jamais supprimées : le volume facturé ne fait que croître")
@@ -101,7 +124,11 @@ func (t Template) Audit(s Settings) []Deviation {
 			add("cycle-marqueurs", Info, FixAfter, "marqueurs de suppression orphelins non nettoyés")
 		}
 		if t.AbortMultipartDays > 0 && (s.Lifecycle.AbortMultipartDays == 0 || s.Lifecycle.AbortMultipartDays > t.AbortMultipartDays) {
-			add("cycle-multipart", Info, FixAfter, "envois interrompus gardés jusqu'à 31 jours (modèle : %d)", t.AbortMultipartDays)
+			kept := "sans limite fixée par le cycle de vie"
+			if s.Lifecycle.AbortMultipartDays > 0 {
+				kept = fmt.Sprintf("%d jours", s.Lifecycle.AbortMultipartDays)
+			}
+			add("cycle-multipart", Info, FixAfter, "envois interrompus gardés %s (modèle : %d jours)", kept, t.AbortMultipartDays)
 		}
 		for _, r := range s.Lifecycle.PartialRules {
 			add("cycle-partiel", Info, FixAfter, "règle de cycle de vie non prise en compte : %s", r)

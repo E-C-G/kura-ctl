@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/E-C-G/kura-ctl/internal/jobs"
@@ -52,26 +53,36 @@ type Server struct {
 	Idle       time.Duration
 	Version    string
 	Now        func() time.Time
+	// PlainHost : servir sur 127.0.0.1 seulement, sans nom d'hôte aléatoire (navigateur
+	// qui ne résout pas les sous-domaines de localhost).
+	PlainHost bool
 
-	mu        sync.Mutex
-	hosts     map[string]bool // valeurs admises de l'en-tête Host
-	sess      *session
-	open      *unlocked
-	failures  int
-	lockUntil time.Time
-	pages     map[string]*template.Template
+	mu         sync.Mutex
+	hosts      map[string]bool // valeurs admises de l'en-tête Host
+	url        string          // adresse à ouvrir
+	sess       *session
+	open       *unlocked
+	failures   int
+	lockouts   int
+	lockUntil  time.Time
+	pages      map[string]*template.Template
+	attempt    sync.Mutex  // un seul essai de mot de passe à la fois
+	configured atomic.Bool // coffre présent (évite de lire le trousseau à chaque requête)
 }
 
 type session struct {
 	token    string
 	csrf     string
 	lastSeen time.Time
+	flash    string // message affiché une fois, à la page suivante
 }
 
-// unlocked : ce qui n'existe que console déverrouillée.
+// unlocked : ce qui n'existe que console déverrouillée. ctx est annulé au
+// verrouillage : toute tâche qui détient la clé en dérive.
 type unlocked struct {
 	account jobs.Account
 	runner  *jobs.Runner
+	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
@@ -84,6 +95,12 @@ func (s *Server) now() time.Time {
 
 // Listen ouvre l'écoute sur 127.0.0.1 (port 0 : port libre) et fixe les valeurs
 // admises de l'en-tête Host.
+//
+// Par défaut, la console est servie sous un nom aléatoire (kura-<aléa>.localhost,
+// que les navigateurs résolvent vers 127.0.0.1) : un cookie ne tient pas compte du
+// port, et un cookie posé pour 127.0.0.1 serait envoyé à tout autre service local
+// (serveur de développement, page d'un autre utilisateur de la machine…). Sous un
+// nom que personne d'autre ne connaît, le cookie de session ne part que vers la console.
 func (s *Server) Listen(port string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
 	if err != nil {
@@ -91,9 +108,23 @@ func (s *Server) Listen(port string) (net.Listener, error) {
 	}
 	_, p, _ := net.SplitHostPort(ln.Addr().String())
 	s.mu.Lock()
-	s.hosts = map[string]bool{"127.0.0.1:" + p: true, "localhost:" + p: true}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if s.PlainHost {
+		s.hosts = map[string]bool{"127.0.0.1:" + p: true}
+		s.url = "http://127.0.0.1:" + p + "/"
+	} else {
+		host := "kura-" + randomToken()[:16] + ".localhost:" + p
+		s.hosts = map[string]bool{host: true}
+		s.url = "http://" + host + "/"
+	}
 	return ln, nil
+}
+
+// URL renvoie l'adresse de la console (après Listen).
+func (s *Server) URL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.url
 }
 
 // Handler renvoie le routeur complet.
@@ -168,12 +199,17 @@ type ctxKey struct{}
 // requireSession : console configurée, déverrouillée, session valide, CSRF sur POST.
 func (s *Server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ok, err := s.Vault.Exists(); err != nil {
-			s.fail(w, r, err)
-			return
-		} else if !ok {
-			redirect(w, r, "/setup")
-			return
+		if !s.configured.Load() {
+			ok, err := s.Vault.Exists()
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
+			if !ok {
+				redirect(w, r, "/setup")
+				return
+			}
+			s.configured.Store(true)
 		}
 		c, err := r.Cookie(cookieName)
 		s.mu.Lock()
@@ -185,7 +221,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 		}
 		s.mu.Unlock()
 		if expired {
-			s.lock("inactivité")
+			s.lockIf(sess, "inactivité")
 		}
 		if !valid || expired {
 			redirect(w, r, "/unlock")
@@ -214,24 +250,42 @@ func randomToken() string {
 }
 
 // startSession déverrouille la console avec la clé donnée : session, client Wasabi,
-// tâches de fond.
-func (s *Server) startSession(w http.ResponseWriter, k secrets.Keys) {
-	s.lock("nouvelle session")
+// tâches de fond. L'éventuelle session précédente est remplacée et annulée dans la
+// même section critique : deux déverrouillages simultanés ne laissent pas de tâche
+// orpheline qui garderait la clé.
+func (s *Server) startSession(w http.ResponseWriter, k secrets.Keys, flash string) {
 	acc := s.NewAccount(wasabi.Keys{AccessKeyID: k.AccessKeyID, SecretAccessKey: k.SecretAccessKey})
 	ctx, cancel := context.WithCancel(context.Background())
 	runner := &jobs.Runner{Store: s.Store, Account: acc, Template: wasabi.Standard, Log: s.Log, Now: s.Now}
-	sess := &session{token: randomToken(), csrf: randomToken(), lastSeen: s.now()}
+	sess := &session{token: randomToken(), csrf: randomToken(), lastSeen: s.now(), flash: flash}
 	s.mu.Lock()
+	old, hadSess := s.open, s.sess != nil
 	s.sess = sess
-	s.open = &unlocked{account: acc, runner: runner, cancel: cancel}
+	s.open = &unlocked{account: acc, runner: runner, ctx: ctx, cancel: cancel}
 	s.mu.Unlock()
+	if old != nil {
+		old.cancel()
+	}
+	if hadSess {
+		s.Log.Info("session précédente fermée", "raison", "nouvelle session")
+	}
 	go runner.Loop(ctx, RefreshEvery)
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sess.token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
-// lock referme la console : la clé et le client Wasabi sont oubliés.
-func (s *Server) lock(reason string) {
+// lock referme la console : le client Wasabi est abandonné et les tâches en cours
+// sont annulées.
+func (s *Server) lock(reason string) { s.lockIf(nil, reason) }
+
+// lockIf ne referme que si la session courante est encore sess (nil : quelle qu'elle
+// soit) : une session tout juste ouverte n'est pas fermée par l'expiration de la
+// précédente.
+func (s *Server) lockIf(sess *session, reason string) {
 	s.mu.Lock()
+	if sess != nil && s.sess != sess {
+		s.mu.Unlock()
+		return
+	}
 	open := s.open
 	had := s.sess != nil
 	s.open, s.sess = nil, nil
@@ -242,6 +296,27 @@ func (s *Server) lock(reason string) {
 	if had {
 		s.Log.Info("console verrouillée", "raison", reason)
 	}
+}
+
+// flash garde un message pour la prochaine page de la session de r.
+func (s *Server) flash(r *http.Request, msg string) {
+	if sess := sessionOf(r); sess != nil {
+		s.mu.Lock()
+		sess.flash = msg
+		s.mu.Unlock()
+	}
+}
+
+// takeFlash renvoie et efface le message en attente.
+func (s *Server) takeFlash(sess *session) string {
+	if sess == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := sess.flash
+	sess.flash = ""
+	return m
 }
 
 // Watch verrouille la console après inactivité, même sans requête.
@@ -290,31 +365,40 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	http.Error(w, "erreur : "+err.Error(), http.StatusInternalServerError)
 }
 
-// throttle : 1 s par échec de mot de passe, puis 60 s de blocage après 5 échecs.
-func (s *Server) throttle() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.now().Before(s.lockUntil) {
-		return errors.New("trop d'essais : réessayer dans une minute")
-	}
-	return nil
-}
+// errThrottled : trop d'essais de mot de passe.
+var errThrottled = errors.New("trop d'essais : réessayer plus tard")
 
-func (s *Server) passwordFailed() {
-	time.Sleep(time.Second)
+// tryPassword déchiffre le coffre avec un mot de passe. Les essais passent un par
+// un (même envoyés en parallèle) : 1 s d'attente après chaque échec, puis blocage
+// après 5 échecs, d'une minute la première fois et doublé à chaque fois (1 h au plus).
+func (s *Server) tryPassword(pw string) (secrets.Keys, error) {
+	s.attempt.Lock()
+	defer s.attempt.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.failures++
-	if s.failures >= 5 {
-		s.failures = 0
-		s.lockUntil = s.now().Add(time.Minute)
-	}
-}
-
-func (s *Server) passwordOK() {
-	s.mu.Lock()
-	s.failures = 0
+	blocked := s.now().Before(s.lockUntil)
 	s.mu.Unlock()
+	if blocked {
+		return secrets.Keys{}, errThrottled
+	}
+	k, err := s.Vault.Unlock(pw)
+	switch {
+	case errors.Is(err, secrets.ErrWrongPassword):
+		time.Sleep(time.Second)
+		s.mu.Lock()
+		s.failures++
+		if s.failures >= 5 {
+			s.failures = 0
+			d := time.Minute << min(s.lockouts, 6)
+			s.lockouts++
+			s.lockUntil = s.now().Add(min(d, time.Hour))
+		}
+		s.mu.Unlock()
+	case err == nil:
+		s.mu.Lock()
+		s.failures, s.lockouts = 0, 0
+		s.mu.Unlock()
+	}
+	return k, err
 }
 
 func trim(r *http.Request, k string) string { return strings.TrimSpace(r.PostFormValue(k)) }

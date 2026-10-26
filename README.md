@@ -10,9 +10,8 @@ elle se contente d'une clé qui ne peut que lire.
 ## Ce que fait la console
 
 - **Vue d'ensemble** : par client et par bucket, espace facturé, nombre d'objets,
-  coût mensuel estimé (avec le minimum facturé de 1 To par compte), alertes
-  (forte croissance sur 7 jours, statistiques non à jour depuis plus de 3 jours,
-  écart critique au modèle).
+  coût mensuel estimé, alertes (forte croissance sur 7 jours, statistiques non à
+  jour depuis plus de 3 jours, écart critique ou important au modèle, réglage illisible).
 - **Import des buckets** : la console liste les buckets du compte ; on rattache
   chacun à un code client (`acme`, proposé à partir du nom `acme-srv01`) et au poste
   sauvegardé.
@@ -21,9 +20,21 @@ elle se contente d'une clé qui ne peut que lire.
   interrompus), stratégie du bucket. Chaque écart a une gravité et indique s'il
   se corrige maintenant ou seulement à la création du bucket (Object Lock).
 - **Historique d'usage** : graphique quotidien par bucket, à partir de l'API Stats
-  de Wasabi (jusqu'à 365 jours d'historique au premier import, puis complété chaque jour).
+  de Wasabi : 365 jours d'historique à l'import, puis complété à chaque
+  déverrouillage (et toutes les 24 h si la console reste ouverte et déverrouillée).
+  Les jours où la console est restée fermée sont rattrapés.
 - **Journal d'audit** : chaque action (déverrouillage, import, relevé, réglages)
   est consignée dans la base, sans possibilité de modification ni de suppression.
+
+Coût estimé, selon la formule publiée par Wasabi : chaque jour,
+`max(stockage actif du compte, 1 To) + stockage supprimé encore facturé`, le stockage
+actif comptant les objets arrondis et les métadonnées, en To de 1024 Go de 1024³
+octets ; l'estimation mensuelle est la moyenne des 30 derniers jours connus × le tarif.
+La facture Wasabi fait foi.
+
+Si un réglage ne peut pas être relu (panne passagère, droit retiré à la clé), l'écart
+déjà connu reste affiché, évalué sur la dernière valeur lue, et le réglage illisible
+devient lui-même une alerte.
 
 Modèle de réglages appliqué par l'audit :
 
@@ -41,13 +52,16 @@ Modèle de réglages appliqué par l'audit :
 Télécharger l'archive de son système depuis les
 [releases](https://github.com/E-C-G/kura-ctl/releases), vérifier l'empreinte
 avec `SHA256SUMS`, puis lancer `kura-ctl` (`kura-ctl.exe` sous Windows).
-La console ouvre le navigateur sur `http://127.0.0.1:<port>`.
+La console ouvre le navigateur sur une adresse locale de la forme
+`http://kura-<aléa>.localhost:<port>/` (voir *Sécurité*). Si le navigateur ne
+résout pas ce nom, relancer avec `--plain-host` pour servir sur `http://127.0.0.1:<port>/`.
 
 | Option | Effet |
 |---|---|
 | `--data <dossier>` | dossier de la base et du journal (défaut : dossier de configuration de l'utilisateur, `kura-ctl`) |
 | `--port <n>` | port local fixe (défaut : un port libre) |
 | `--no-browser` | ne pas ouvrir le navigateur (l'adresse est affichée) |
+| `--plain-host` | servir sur `127.0.0.1` plutôt que sous un nom aléatoire en `.localhost` |
 | `--reset` | effacer la clé d'administration du trousseau (mot de passe maître oublié) |
 | `--version` | afficher la version |
 
@@ -101,6 +115,12 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
 - **Écoute locale uniquement** (`127.0.0.1`) et contrôle de l'en-tête `Host` : une page
   d'un autre site qui ferait pointer un nom de domaine vers la machine (DNS rebinding)
   est refusée.
+- **Nom d'hôte aléatoire** à chaque lancement (`kura-<aléa>.localhost`) : un cookie ne
+  tient pas compte du port, et un cookie posé pour `127.0.0.1` serait aussi envoyé à
+  tout autre service local (serveur de développement, page servie par un autre
+  utilisateur de la machine). Sous un nom que lui seul connaît, le cookie de session ne
+  part que vers la console. Avec `--plain-host`, cette protection disparaît : ne pas
+  visiter d'autre service local pendant que la console est déverrouillée.
 - **Clé d'administration chiffrée** dans le trousseau du système (Gestionnaire
   d'identification Windows, Trousseau macOS, Secret Service sous Linux) : AES-256-GCM,
   clé dérivée du mot de passe maître par PBKDF2-SHA256 (600 000 itérations). La clé
@@ -108,11 +128,19 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
 - **Une seule session** : cookie `HttpOnly`, `SameSite=Strict` ; jeton anti-CSRF sur
   chaque formulaire ; contrôle de l'origine des requêtes ; politique de sécurité du
   contenu sans script en ligne ; page non intégrable dans un cadre.
-- **Verrouillage** après 30 minutes d'inactivité (la clé est oubliée), ou par le bouton
-  *Verrouiller*. Après 5 mots de passe faux, une minute d'attente.
+- **Verrouillage** après 30 minutes d'inactivité, ou par le bouton *Verrouiller* : la
+  console abandonne le client Wasabi et annule toutes les tâches en cours. Go ne permet
+  pas d'effacer la mémoire de façon garantie : une copie de la clé peut y subsister
+  jusqu'à ce que le ramasse-miettes la réutilise.
+- **Mots de passe** : un essai à la fois, 1 s d'attente après un échec, puis blocage
+  après 5 échecs (1 minute, doublé à chaque nouveau blocage, 1 h au plus).
 - **Mot de passe maître oublié** : `kura-ctl --reset` efface la clé du trousseau ; il
   suffit de la ressaisir avec un nouveau mot de passe. Les données de la base
   (buckets, historique, journal) sont conservées.
+
+**Linux** : la console a besoin d'un service de trousseau (Secret Service : GNOME
+Keyring, KWallet…). Sur un serveur sans interface ou sous WSL, elle le signale dès la
+configuration.
 
 La base (`kura-ctl.db`, SQLite) ne contient aucun secret : codes clients, réglages
 relevés, historique d'usage, journal d'audit.

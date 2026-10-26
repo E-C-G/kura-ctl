@@ -15,9 +15,9 @@
 
 <section class="tiles">
   <div class="tile"><span>Stockage facturé (dernier jour)</span><strong>{{tb $d.TotalTB}} To</strong></div>
-  <div class="tile"><span>Moyenne du mois</span><strong>{{tb $d.MonthAvgTB}} To</strong></div>
-  <div class="tile"><span>Coût estimé {{$d.Month}}</span><strong>{{money $d.BilledCost $cur}}</strong>
-    {{if $d.MinimumHits}}<em>minimum facturé d'1 To ({{money $d.MonthCost $cur}} d'usage réel)</em>{{end}}</div>
+  <div class="tile"><span>Moyenne sur 30 jours</span><strong>{{tb $d.MonthAvgTB}} To</strong></div>
+  <div class="tile"><span>Coût mensuel estimé</span><strong>{{money $d.BilledCost $cur}}</strong>
+    {{if $d.MinimumHits}}<em>minimum facturé d'1 To actif ({{money $d.MonthCost $cur}} d'usage réel)</em>{{end}}</div>
   <div class="tile"><span>Buckets suivis</span><strong>{{len $d.Buckets}}</strong></div>
 </section>
 
@@ -29,7 +29,7 @@
 <section>
   <h2>Buckets</h2>
   <table>
-    <thead><tr><th>Client</th><th>Bucket</th><th>Région</th><th class="num">Facturé</th><th class="num">Supprimé facturé</th><th class="num">Objets</th><th class="num">Coût du mois</th><th>Écarts au modèle</th><th>Dernier jour</th></tr></thead>
+    <thead><tr><th>Client</th><th>Bucket</th><th>Région</th><th class="num">Facturé</th><th class="num">Supprimé facturé</th><th class="num">Objets</th><th class="num">Coût mensuel</th><th>Écarts au modèle</th><th>Dernier jour</th></tr></thead>
     <tbody>{{range $d.Buckets}}
       <tr><td>{{.ClientCode}}</td><td><a href="/buckets/{{.Name}}">{{.Name}}</a>{{with .Poste}} <span class="muted">({{.}})</span>{{end}}</td><td>{{.Region}}</td>
         <td class="num">{{bytes .Last.PaddedBytes}}</td><td class="num">{{bytes .Last.DeletedBytes}}</td><td class="num">{{.Last.Objects}}</td>
@@ -38,6 +38,6 @@
         <td>{{or .LastDay "—"}}</td></tr>
     {{end}}</tbody>
   </table>
-  <p class="hint">Coût estimé : moyenne journalière du mois (stockage facturé + supprimé encore facturé) × {{money $d.Pricing.PerTB $cur}} par To. Wasabi facture au moins 1 To par mois pour le compte.</p>
+  <p class="hint">Coût estimé selon la formule de Wasabi : chaque jour, max(stockage actif du compte, 1 To) + stockage supprimé encore facturé, moyenne des {{$d.Days}} dernier(s) jour(s) connus × {{money $d.Pricing.PerTB $cur}} par To (1 To = 1024 Go). La facture fait foi.</p>
 </section>
 {{end}}

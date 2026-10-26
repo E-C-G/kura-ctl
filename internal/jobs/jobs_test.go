@@ -17,13 +17,14 @@ type fakeAccount struct {
 	calls    [][3]string
 	settings wasabi.Settings
 	bytes    func(day string) int64
+	deleted  int64
 	fail     error
 }
 
 func (f *fakeAccount) ListBuckets(context.Context) ([]wasabi.BucketInfo, error) { return nil, nil }
 func (f *fakeAccount) ReadSettings(_ context.Context, name, region string) wasabi.Settings {
 	s := f.settings
-	s.Name, s.Region = name, region
+	s.Name, s.Region, s.ReadAt = name, region, time.Now()
 	return s
 }
 func (f *fakeAccount) BucketDaily(_ context.Context, b, from, to string) ([]wasabi.DailyUsage, error) {
@@ -40,7 +41,7 @@ func (f *fakeAccount) BucketDaily(_ context.Context, b, from, to string) ([]wasa
 		if f.bytes != nil {
 			v = f.bytes(day)
 		}
-		out = append(out, wasabi.DailyUsage{Day: day, RawBytes: v, PaddedBytes: v, Objects: 10})
+		out = append(out, wasabi.DailyUsage{Day: day, RawBytes: v, PaddedBytes: v, DeletedBytes: f.deleted, Objects: 10})
 	}
 	return out, nil
 }
@@ -103,11 +104,12 @@ func TestRefreshReportsErrorsPerBucket(t *testing.T) {
 func TestOverviewCostsAndGrowth(t *testing.T) {
 	st, r, acc, now := setup(t)
 	ctx := context.Background()
+	const gib = 1 << 30
 	acc.bytes = func(day string) int64 {
 		if day >= "2026-10-25" {
-			return 900e9 // +80 % la veille : alerte
+			return 900 * gib // +80 % la veille : alerte
 		}
-		return 500e9
+		return 500 * gib
 	}
 	r.Refresh(ctx)
 	ov, err := BuildOverview(ctx, st, Pricing{PerTB: 7, Currency: "$"}, *now)
@@ -115,10 +117,10 @@ func TestOverviewCostsAndGrowth(t *testing.T) {
 		t.Fatal(err)
 	}
 	bs := ov.Buckets[0]
-	// Octobre : 24 jours à 0,5 To puis 2 jours à 0,9 To.
-	want := (24*0.5 + 2*0.9) / 26
-	if d := bs.MonthAvgTB - want; d > 1e-9 || d < -1e-9 {
-		t.Fatalf("moyenne du mois %.6f, attendu %.6f", bs.MonthAvgTB, want)
+	// 30 derniers jours (26/09 → 26/10 inclus, 31 journées) : 29 à 500 Go puis 2 à 900 Go.
+	want := (29*500.0 + 2*900) / 31 / 1024
+	if d := bs.MonthAvgTB - want; d > 1e-9 || d < -1e-9 || ov.Days != 31 {
+		t.Fatalf("moyenne %.6f sur %d jours, attendu %.6f sur 31", bs.MonthAvgTB, ov.Days, want)
 	}
 	if !ov.MinimumHits || ov.BilledCost != 7 {
 		t.Fatalf("minimum d'1 To : %+v", ov)
@@ -126,10 +128,67 @@ func TestOverviewCostsAndGrowth(t *testing.T) {
 	if len(bs.GrowthAlerts) != 1 || !strings.Contains(bs.GrowthAlerts[0].Message, "+80 %") {
 		t.Fatalf("alerte de croissance : %+v", bs.GrowthAlerts)
 	}
-	if ov.Alerts[0].Severity != wasabi.Critical {
+	if ov.Alerts[0].Severity != wasabi.High {
 		t.Fatalf("alertes triées par gravité : %+v", ov.Alerts)
 	}
-	if HumanBytes(1_500_000_000) != "1.50 Go" || HumanBytes(12) != "12 o" {
+	if HumanBytes(1536*1024*1024) != "1.50 Go" || HumanBytes(12) != "12 o" {
 		t.Fatal("HumanBytes")
+	}
+}
+
+// Le minimum d'1 To ne porte que sur le stockage actif : le supprimé s'y ajoute.
+func TestMinimumAppliesToActiveOnly(t *testing.T) {
+	st, r, acc, now := setup(t)
+	ctx := context.Background()
+	acc.bytes = func(string) int64 { return 600 << 30 }
+	acc.deleted = 512 << 30
+	r.Refresh(ctx)
+	ov, _ := BuildOverview(ctx, st, Pricing{PerTB: 10}, *now)
+	if d := ov.BilledCost - 15; d > 1e-9 || d < -1e-9 {
+		t.Fatalf("coût %.4f, attendu 15 (1 To minimum + 0,5 To supprimé)", ov.BilledCost)
+	}
+}
+
+// Petites variations et envoi initial : pas d'alerte de croissance.
+func TestNoGrowthAlertForSmallOrInitial(t *testing.T) {
+	st, r, acc, now := setup(t)
+	ctx := context.Background()
+	acc.bytes = func(day string) int64 {
+		switch {
+		case day < "2026-10-20":
+			return 0 // bucket vide, envoi initial le 20
+		case day < "2026-10-24":
+			return int64(day[9]-'0') * (100 << 30)
+		case day < "2026-10-26":
+			return 4 << 10
+		}
+		return 10 << 20 // de 4 Ko à 10 Mo : sous le seuil absolu
+	}
+	r.Refresh(ctx)
+	ov, _ := BuildOverview(ctx, st, Pricing{PerTB: 7}, *now)
+	if a := ov.Buckets[0].GrowthAlerts; len(a) != 0 {
+		t.Fatalf("alertes inattendues : %+v", a)
+	}
+}
+
+// Une panne passagère ne fait pas disparaître un écart critique déjà relevé.
+func TestUnreadableSettingKeepsKnownDeviation(t *testing.T) {
+	st, r, acc, now := setup(t)
+	ctx := context.Background()
+	acc.settings.Versioning = "Suspended"
+	if err := r.AuditBucket(ctx, "acme-srv01", "eu-central-1"); err != nil {
+		t.Fatal(err)
+	}
+	acc.settings.Versioning = ""
+	acc.settings.ReadErrors = map[string]string{"versioning": "Wasabi injoignable"}
+	r.AuditBucket(ctx, "acme-srv01", "eu-central-1")
+	ov, _ := BuildOverview(ctx, st, Pricing{PerTB: 7}, *now)
+	var crit, unreadable bool
+	for _, a := range ov.Alerts {
+		crit = crit || (a.Severity == wasabi.Critical && strings.Contains(a.Message, "versioning suspendu"))
+		unreadable = unreadable || (a.Severity == wasabi.High && strings.Contains(a.Message, "illisible"))
+	}
+	if !crit || !unreadable {
+		t.Fatalf("alertes : %+v", ov.Alerts)
 	}
 }

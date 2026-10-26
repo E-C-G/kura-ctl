@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,18 +27,20 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open(driverName, path)
+	if strings.ContainsRune(path, '?') {
+		return nil, fmt.Errorf("chemin de base invalide (« ? ») : %s", path)
+	}
+	// Les PRAGMA passent par le DSN : ils valent pour toute connexion, y compris
+	// celles que database/sql rouvre. Une seule connexion : un seul utilisateur.
+	db, err := sql.Open(driverName, dsn(path))
 	if err != nil {
 		return nil, err
 	}
-	// Une seule connexion : les PRAGMA (clés étrangères…) valent par connexion, et la
-	// console n'a qu'un utilisateur.
 	db.SetMaxOpenConns(1)
-	for _, p := range []string{"PRAGMA foreign_keys = ON", "PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000"} {
-		if _, err := db.Exec(p); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("%s : %w", p, err)
-		}
+	var fk int
+	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil || fk != 1 {
+		db.Close()
+		return nil, fmt.Errorf("ouverture de la base : clés étrangères inactives (%v)", err)
 	}
 	s := &Store{db: db, now: time.Now, who: "inconnu"}
 	if u, err := user.Current(); err == nil {
@@ -80,6 +83,7 @@ var migrations = []string{
 		day             TEXT NOT NULL,
 		active_bytes    INTEGER NOT NULL,
 		padded_bytes    INTEGER NOT NULL,
+		metadata_bytes  INTEGER NOT NULL DEFAULT 0,
 		deleted_bytes   INTEGER NOT NULL,
 		objects         INTEGER NOT NULL,
 		deleted_objects INTEGER NOT NULL,
@@ -325,6 +329,7 @@ type Usage struct {
 	Day            string // YYYY-MM-DD (UTC)
 	ActiveBytes    int64  // RawStorageSizeBytes : données courantes et versions
 	PaddedBytes    int64  // PaddedStorageSizeBytes : stockage facturé (objets arrondis à 4 Ko)
+	MetadataBytes  int64  // MetadataStorageSizeBytes : facturé avec le stockage actif
 	DeletedBytes   int64  // DeletedStorageSizeBytes : supprimé avant 90 jours, encore facturé
 	Objects        int64
 	DeletedObjects int64
@@ -340,10 +345,10 @@ func (s *Store) UpsertUsage(ctx context.Context, rows []Usage) error {
 	}
 	defer tx.Rollback()
 	st, err := tx.PrepareContext(ctx, `INSERT INTO usage_daily
-		(bucket, day, active_bytes, padded_bytes, deleted_bytes, objects, deleted_objects, upload_bytes, download_bytes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(bucket, day, active_bytes, padded_bytes, metadata_bytes, deleted_bytes, objects, deleted_objects, upload_bytes, download_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(bucket, day) DO UPDATE SET
-			active_bytes = excluded.active_bytes, padded_bytes = excluded.padded_bytes,
+			active_bytes = excluded.active_bytes, padded_bytes = excluded.padded_bytes, metadata_bytes = excluded.metadata_bytes,
 			deleted_bytes = excluded.deleted_bytes, objects = excluded.objects,
 			deleted_objects = excluded.deleted_objects, upload_bytes = excluded.upload_bytes,
 			download_bytes = excluded.download_bytes`)
@@ -352,12 +357,19 @@ func (s *Store) UpsertUsage(ctx context.Context, rows []Usage) error {
 	}
 	defer st.Close()
 	for _, u := range rows {
-		if _, err := st.ExecContext(ctx, u.Bucket, u.Day, u.ActiveBytes, u.PaddedBytes, u.DeletedBytes,
+		if _, err := st.ExecContext(ctx, u.Bucket, u.Day, u.ActiveBytes, u.PaddedBytes, u.MetadataBytes, u.DeletedBytes,
 			u.Objects, u.DeletedObjects, u.UploadBytes, u.DownloadBytes); err != nil {
 			return fmt.Errorf("usage %s %s : %w", u.Bucket, u.Day, err)
 		}
 	}
 	return tx.Commit()
+}
+
+// FirstUsageDay renvoie le premier jour où le bucket contenait des données ("" si aucun).
+func (s *Store) FirstUsageDay(ctx context.Context, bucket string) (string, error) {
+	var d sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT MIN(day) FROM usage_daily WHERE bucket = ? AND padded_bytes > 0`, bucket).Scan(&d)
+	return d.String, err
 }
 
 // LastUsageDay renvoie le dernier jour enregistré pour un bucket ("" si aucun).
@@ -370,7 +382,7 @@ func (s *Store) LastUsageDay(ctx context.Context, bucket string) (string, error)
 // UsageRange renvoie l'usage d'un bucket entre deux jours inclus, par jour croissant.
 // bucket vide : tous les buckets.
 func (s *Store) UsageRange(ctx context.Context, bucket, from, to string) ([]Usage, error) {
-	q := `SELECT bucket, day, active_bytes, padded_bytes, deleted_bytes, objects, deleted_objects, upload_bytes, download_bytes
+	q := `SELECT bucket, day, active_bytes, padded_bytes, metadata_bytes, deleted_bytes, objects, deleted_objects, upload_bytes, download_bytes
 		FROM usage_daily WHERE day >= ? AND day <= ?`
 	args := []any{from, to}
 	if bucket != "" {
@@ -385,7 +397,7 @@ func (s *Store) UsageRange(ctx context.Context, bucket, from, to string) ([]Usag
 	var out []Usage
 	for rows.Next() {
 		var u Usage
-		if err := rows.Scan(&u.Bucket, &u.Day, &u.ActiveBytes, &u.PaddedBytes, &u.DeletedBytes,
+		if err := rows.Scan(&u.Bucket, &u.Day, &u.ActiveBytes, &u.PaddedBytes, &u.MetadataBytes, &u.DeletedBytes,
 			&u.Objects, &u.DeletedObjects, &u.UploadBytes, &u.DownloadBytes); err != nil {
 			return nil, err
 		}

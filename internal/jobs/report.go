@@ -11,11 +11,16 @@ import (
 	"github.com/E-C-G/kura-ctl/internal/wasabi"
 )
 
-// TB : Wasabi facture au téraoctet (10^12 octets).
-const TB = 1e12
+// TB : unité de facturation de Wasabi, en base 1024 (1 To = 1024 Go de 1024³ octets).
+const TB = 1 << 40
 
-// MinBilledTB : en paiement à l'usage, Wasabi facture au moins 1 To par mois et par compte.
+// MinBilledTB : en paiement à l'usage, Wasabi facture chaque jour au moins 1 To de
+// stockage actif par compte ; le stockage supprimé encore facturé s'y ajoute.
 const MinBilledTB = 1.0
+
+// Window : période de l'estimation des coûts (30 jours glissants : une estimation
+// est disponible même en début de mois, quand Wasabi n'a encore rien publié).
+const Window = 30
 
 // Pricing sert à estimer les coûts.
 type Pricing struct {
@@ -28,8 +33,8 @@ type BucketSummary struct {
 	store.Bucket
 	LastDay      string
 	Last         store.Usage // dernière journée connue
-	MonthAvgTB   float64     // stockage facturé moyen du mois (actif arrondi + supprimé facturé)
-	MonthCost    float64
+	MonthAvgTB   float64     // moyenne sur 30 jours : actif (arrondi + métadonnées) + supprimé facturé
+	MonthCost    float64     // part du bucket, hors minimum du compte
 	Deviations   []wasabi.Deviation
 	BySeverity   map[string]int
 	Settings     *wasabi.Settings
@@ -45,33 +50,42 @@ type Alert struct {
 
 // Overview est la vue d'ensemble.
 type Overview struct {
-	Month       string
 	Buckets     []BucketSummary
 	TotalTB     float64 // stockage facturé du jour le plus récent
-	MonthAvgTB  float64
-	MonthCost   float64 // somme des buckets
-	BilledCost  float64 // avec le minimum facturé du compte
-	MinimumHits bool    // le minimum d'1 To s'applique
+	MonthAvgTB  float64 // moyenne sur 30 jours, tous buckets
+	MonthCost   float64 // somme des buckets (usage réel)
+	BilledCost  float64 // avec le minimum d'1 To de stockage actif
+	MinimumHits bool    // le minimum s'applique au moins un jour
+	Days        int     // journées prises en compte
 	Alerts      []Alert
 }
 
-// GrowthThreshold : croissance journalière qui déclenche l'alerte (+20 %).
-const GrowthThreshold = 0.20
+// Croissance qui déclenche l'alerte : +20 % en un jour et au moins 1 Go de plus,
+// hors des 7 premiers jours d'un bucket (envoi initial).
+const (
+	GrowthThreshold = 0.20
+	GrowthMinBytes  = 1 << 30
+	GrowthGrace     = 7
+)
 
 // BuildOverview calcule la vue d'ensemble à partir de la base.
+//
+// Coût, selon la formule publiée par Wasabi : chaque jour,
+// (max(actif, 1 To) + supprimé) × tarif / 30, l'actif étant la somme, sur le compte,
+// du stockage arrondi et des métadonnées. L'estimation mensuelle est la moyenne
+// journalière des 30 derniers jours connus × tarif.
 func BuildOverview(ctx context.Context, st *store.Store, p Pricing, now time.Time) (Overview, error) {
 	now = now.UTC()
-	ov := Overview{Month: now.Format("2006-01")}
+	var ov Overview
 	buckets, err := st.Buckets(ctx)
 	if err != nil {
 		return ov, err
 	}
-	monthStart := now.Format("2006-01") + "-01"
-	since := now.AddDate(0, 0, -30).Format("2006-01-02")
-	if monthStart < since {
-		since = monthStart
-	}
 	today := now.Format("2006-01-02")
+	since := now.AddDate(0, 0, -Window).Format("2006-01-02")
+	recent := now.AddDate(0, 0, -7).Format("2006-01-02")
+	type dayTotal struct{ active, deleted float64 }
+	perDay := map[string]*dayTotal{}
 	for _, b := range buckets {
 		bs := BucketSummary{Bucket: b, BySeverity: map[string]int{}}
 		if b.SettingsJSON != "" {
@@ -89,34 +103,49 @@ func BuildOverview(ctx context.Context, st *store.Store, p Pricing, now time.Tim
 				ov.Alerts = append(ov.Alerts, Alert{Severity: d.Severity, Bucket: b.Name, Message: d.Message})
 			}
 		}
+		if b.AuditError != "" && len(bs.Deviations) == 0 {
+			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.High, Bucket: b.Name, Message: "dernier relevé en échec : " + b.AuditError})
+		}
+		first, err := st.FirstUsageDay(ctx, b.Name)
+		if err != nil {
+			return ov, err
+		}
+		graceEnd := ""
+		if t, err := time.Parse("2006-01-02", first); err == nil {
+			graceEnd = t.AddDate(0, 0, GrowthGrace).Format("2006-01-02")
+		}
 		rows, err := st.UsageRange(ctx, b.Name, since, today)
 		if err != nil {
 			return ov, err
 		}
 		var sum float64
-		var n int
 		for i, u := range rows {
-			if u.Day >= monthStart {
-				sum += float64(u.PaddedBytes + u.DeletedBytes)
-				n++
+			active := float64(u.PaddedBytes + u.MetadataBytes)
+			sum += active + float64(u.DeletedBytes)
+			if perDay[u.Day] == nil {
+				perDay[u.Day] = &dayTotal{}
 			}
-			if i > 0 {
-				prev := rows[i-1]
-				if prev.PaddedBytes > 0 && float64(u.PaddedBytes-prev.PaddedBytes)/float64(prev.PaddedBytes) > GrowthThreshold &&
-					u.Day >= now.AddDate(0, 0, -7).Format("2006-01-02") {
-					a := Alert{Severity: wasabi.Critical, Bucket: b.Name, Message: fmt.Sprintf(
-						"croissance de %+.0f %% le %s (%s → %s) : vérifier le poste (chiffrement par un rançongiciel ?)",
-						100*float64(u.PaddedBytes-prev.PaddedBytes)/float64(prev.PaddedBytes), u.Day,
-						HumanBytes(prev.PaddedBytes), HumanBytes(u.PaddedBytes))}
-					bs.GrowthAlerts = append(bs.GrowthAlerts, a)
-					ov.Alerts = append(ov.Alerts, a)
-				}
+			perDay[u.Day].active += active
+			perDay[u.Day].deleted += float64(u.DeletedBytes)
+			if i == 0 || u.Day < recent || u.Day <= graceEnd {
+				continue
+			}
+			prev := rows[i-1]
+			delta := u.PaddedBytes - prev.PaddedBytes
+			if prev.PaddedBytes > 0 && delta >= GrowthMinBytes && float64(delta)/float64(prev.PaddedBytes) > GrowthThreshold {
+				a := Alert{Severity: wasabi.High, Bucket: b.Name, Message: fmt.Sprintf(
+					"croissance de %+.0f %% le %s (%s → %s) : vérifier le poste (fichiers chiffrés par un rançongiciel ?)",
+					100*float64(delta)/float64(prev.PaddedBytes), u.Day, HumanBytes(prev.PaddedBytes), HumanBytes(u.PaddedBytes))}
+				bs.GrowthAlerts = append(bs.GrowthAlerts, a)
+				ov.Alerts = append(ov.Alerts, a)
 			}
 		}
 		if len(rows) > 0 {
 			bs.Last = rows[len(rows)-1]
 			bs.LastDay = bs.Last.Day
-			ov.TotalTB += float64(bs.Last.PaddedBytes+bs.Last.DeletedBytes) / TB
+			bs.MonthAvgTB = sum / float64(len(rows)) / TB
+			bs.MonthCost = bs.MonthAvgTB * p.PerTB
+			ov.TotalTB += float64(bs.Last.PaddedBytes+bs.Last.MetadataBytes+bs.Last.DeletedBytes) / TB
 		} else if last, _ := st.LastUsageDay(ctx, b.Name); last != "" {
 			bs.LastDay = last
 		}
@@ -127,31 +156,39 @@ func BuildOverview(ctx context.Context, st *store.Store, p Pricing, now time.Tim
 			}
 			ov.Alerts = append(ov.Alerts, Alert{Severity: wasabi.Medium, Bucket: b.Name, Message: msg})
 		}
-		if n > 0 {
-			bs.MonthAvgTB = sum / float64(n) / TB
-			bs.MonthCost = bs.MonthAvgTB * p.PerTB
-		}
-		ov.MonthAvgTB += bs.MonthAvgTB
 		ov.MonthCost += bs.MonthCost
 		ov.Buckets = append(ov.Buckets, bs)
 	}
-	ov.BilledCost = ov.MonthCost
-	if ov.MonthAvgTB < MinBilledTB {
-		ov.MinimumHits = true
+	var billed, real float64
+	for _, d := range perDay {
+		active := d.active / TB
+		real += active + d.deleted/TB
+		if active < MinBilledTB {
+			active = MinBilledTB
+			ov.MinimumHits = true
+		}
+		billed += active + d.deleted/TB
+	}
+	if ov.Days = len(perDay); ov.Days > 0 {
+		ov.MonthAvgTB = real / float64(ov.Days)
+		ov.BilledCost = billed / float64(ov.Days) * p.PerTB
+	} else {
 		ov.BilledCost = MinBilledTB * p.PerTB
+		ov.MinimumHits = true
 	}
 	rank := map[string]int{wasabi.Critical: 0, wasabi.High: 1, wasabi.Medium: 2, wasabi.Info: 3}
 	sort.SliceStable(ov.Alerts, func(i, j int) bool { return rank[ov.Alerts[i].Severity] < rank[ov.Alerts[j].Severity] })
 	return ov, nil
 }
 
-// HumanBytes écrit une taille en unités décimales (comme la facturation Wasabi).
+// HumanBytes écrit une taille en base 1024, comme la facturation Wasabi
+// (1 Go = 1024³ octets).
 func HumanBytes(b int64) string {
 	f := float64(b)
 	units := []string{"o", "Ko", "Mo", "Go", "To", "Po"}
 	i := 0
-	for f >= 1000 && i < len(units)-1 {
-		f /= 1000
+	for f >= 1024 && i < len(units)-1 {
+		f /= 1024
 		i++
 	}
 	if i == 0 {

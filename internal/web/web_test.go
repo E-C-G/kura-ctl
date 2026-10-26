@@ -2,8 +2,10 @@ package web
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -63,7 +65,7 @@ func (f *fakeAccount) ReadSettings(_ context.Context, name, region string) wasab
 	return wasabi.Settings{Name: name, Region: region, Versioning: "Enabled", Lifecycle: wasabi.Lifecycle{Present: true, NoncurrentDays: 90}}
 }
 func (f *fakeAccount) BucketDaily(_ context.Context, b, from, to string) ([]wasabi.DailyUsage, error) {
-	return []wasabi.DailyUsage{{Day: to, PaddedBytes: 600e9, RawBytes: 590e9, Objects: 1234}}, nil
+	return []wasabi.DailyUsage{{Day: to, PaddedBytes: 600 << 30, RawBytes: 590 << 30, Objects: 1234}}, nil
 }
 
 type harness struct {
@@ -103,7 +105,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hn.host = ln.Addr().String()
+	hn.host = strings.TrimSuffix(strings.TrimPrefix(hn.srv.URL(), "http://"), "/")
+	if !strings.HasPrefix(hn.host, "kura-") || !strings.Contains(hn.host, ".localhost:") {
+		t.Fatalf("nom d'hôte aléatoire attendu : %s", hn.host)
+	}
 	ln.Close()
 	if hn.h, err = hn.srv.Handler(); err != nil {
 		t.Fatal(err)
@@ -169,14 +174,18 @@ func setupForm(pw, secret string) url.Values {
 func TestFullFlow(t *testing.T) {
 	hn := newHarness(t)
 
-	// En-tête Host d'un autre site (DNS rebinding) : refusé.
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Host = "evil.example:80"
-	rec := httptest.NewRecorder()
-	hn.h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusMisdirectedRequest {
-		t.Fatalf("hôte étranger : %d", rec.Code)
+	// En-tête Host d'un autre site (DNS rebinding), ou 127.0.0.1 hors --plain-host : refusé.
+	_, port, _ := net.SplitHostPort(hn.host)
+	for _, h := range []string{"evil.example:80", "127.0.0.1:" + port, "localhost:" + port} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = h
+		rec := httptest.NewRecorder()
+		hn.h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMisdirectedRequest {
+			t.Fatalf("hôte %s : %d", h, rec.Code)
+		}
 	}
+	var rec *httptest.ResponseRecorder
 
 	expectRedirect(t, hn.do("GET", "/", nil, nil), "/setup")
 	rec = hn.do("GET", "/setup", nil, nil)
@@ -213,6 +222,14 @@ func TestFullFlow(t *testing.T) {
 		t.Fatalf("import depuis une autre origine : %d", rec.Code)
 	}
 	expectRedirect(t, hn.do("POST", "/buckets/import", imp, nil), "/buckets/acme-srv01")
+	// Double clic : pas d'erreur, renvoi vers le bucket.
+	expectRedirect(t, hn.do("POST", "/buckets/import", imp, nil), "/buckets/acme-srv01")
+	if rec := hn.do("GET", "/buckets/acme-srv01", nil, nil); !strings.Contains(rec.Body.String(), "Bucket importé") {
+		t.Fatalf("message après import absent :\n%s", rec.Body.String())
+	}
+	if rec := hn.do("GET", "/buckets/acme-srv01?ok=Ressaisissez+votre+cl%C3%A9", nil, nil); strings.Contains(rec.Body.String(), "Ressaisissez") {
+		t.Fatal("message injecté par l'URL affiché")
+	}
 	b, err := hn.st.Bucket(context.Background(), "acme-srv01")
 	if err != nil || b.Region != "eu-central-1" || b.ClientCode != "acme" {
 		t.Fatalf("bucket importé : %+v %v", b, err)
@@ -233,7 +250,7 @@ func TestFullFlow(t *testing.T) {
 		t.Fatalf("vue d'ensemble : %d\n%s", rec.Code, rec.Body.String())
 	}
 	rec = hn.do("GET", "/api/usage?bucket=acme-srv01", nil, nil)
-	if !strings.Contains(rec.Body.String(), `"padded_gb":600`) {
+	if !strings.Contains(rec.Body.String(), `"padded_gb":600,`) {
 		t.Fatalf("API d'usage : %s", rec.Body.String())
 	}
 	if rec := hn.do("GET", "/audit", nil, nil); !strings.Contains(rec.Body.String(), "import du bucket") || strings.Contains(rec.Body.String(), "SECRET") {
@@ -271,6 +288,61 @@ func TestSettingsAndPassword(t *testing.T) {
 	expectRedirect(t, hn.do("POST", "/settings/password", pw, nil), "/settings")
 	if _, err := hn.srv.Vault.Unlock("un nouveau mot de passe"); err != nil {
 		t.Fatalf("nouveau mot de passe : %v", err)
+	}
+}
+
+// Des essais envoyés en parallèle passent un par un : la limite tient.
+func TestPasswordAttemptsSerialized(t *testing.T) {
+	hn := newHarness(t)
+	hn.do("POST", "/setup", setupForm("un mot de passe solide", "SECRET"), nil)
+	hn.do("POST", "/lock", url.Values{"csrf": {hn.csrf("/settings")}}, nil)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	evaluated := 0
+	start := time.Now()
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := hn.srv.tryPassword("faux mot de passe")
+			if errors.Is(err, secrets.ErrWrongPassword) {
+				mu.Lock()
+				evaluated++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if evaluated != 5 {
+		t.Fatalf("%d essais évalués, 5 attendus avant blocage", evaluated)
+	}
+	if d := time.Since(start); d < 5*time.Second {
+		t.Fatalf("essais non sérialisés : %v", d)
+	}
+	if _, err := hn.srv.tryPassword("un mot de passe solide"); !errors.Is(err, errThrottled) {
+		t.Fatalf("bon mot de passe accepté pendant le blocage : %v", err)
+	}
+	hn.advance(time.Minute + time.Second)
+	if _, err := hn.srv.tryPassword("un mot de passe solide"); err != nil {
+		t.Fatalf("après le blocage : %v", err)
+	}
+}
+
+// Deux déverrouillages : la session remplacée n'a plus de tâche vivante.
+func TestStartSessionCancelsPrevious(t *testing.T) {
+	hn := newHarness(t)
+	k := secrets.Keys{AccessKeyID: "AKIDADMIN", SecretAccessKey: "SECRET"}
+	hn.srv.startSession(httptest.NewRecorder(), k, "")
+	first := hn.srv.current()
+	hn.srv.startSession(httptest.NewRecorder(), k, "")
+	select {
+	case <-first.ctx.Done():
+	default:
+		t.Fatal("tâches de la première session encore actives")
+	}
+	hn.srv.lock("test")
+	if hn.srv.current() != nil {
+		t.Fatal("console encore ouverte")
 	}
 }
 

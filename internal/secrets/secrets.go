@@ -27,8 +27,10 @@ const (
 	service    = "kura-ctl"
 	account    = "wasabi-admin"
 	iterations = 600_000 // recommandation OWASP 2023 pour PBKDF2-HMAC-SHA256
-	saltLen    = 16
-	version    = "v1"
+	// maxIterations : au-delà, le coffre est tenu pour altéré (déverrouillage interminable).
+	maxIterations = 10_000_000
+	saltLen       = 16
+	version       = "v1"
 )
 
 // MinPasswordLen : longueur minimale du mot de passe maître.
@@ -96,6 +98,16 @@ func (v *Vault) Exists() (bool, error) {
 	return true, nil
 }
 
+// Probe vérifie que le trousseau accepte une écriture, avant de demander quoi que
+// ce soit d'autre (Linux sans Secret Service, trousseau verrouillé…).
+func (v *Vault) Probe() error {
+	if err := v.Keyring.Set(service, account+"-test", "ok"); err != nil {
+		return fmt.Errorf("trousseau du système inutilisable : %w", err)
+	}
+	_ = v.Keyring.Delete(service, account+"-test")
+	return nil
+}
+
 // CheckPassword vérifie la solidité minimale d'un nouveau mot de passe maître.
 func CheckPassword(p string) error {
 	if utf8.RuneCountInString(p) < MinPasswordLen {
@@ -153,7 +165,7 @@ func (v *Vault) Unlock(password string) (Keys, error) {
 		return Keys{}, errors.New("coffre illisible (format inconnu)")
 	}
 	var iter int
-	if _, err := fmt.Sscan(parts[1], &iter); err != nil || iter < 1 {
+	if _, err := fmt.Sscan(parts[1], &iter); err != nil || iter < 1 || iter > maxIterations {
 		return Keys{}, errors.New("coffre illisible (itérations)")
 	}
 	enc := base64.RawStdEncoding

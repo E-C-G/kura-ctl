@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -67,30 +68,41 @@ func (c *Client) s3(region string) *s3.Client {
 // BucketInfo est un bucket du compte.
 type BucketInfo struct {
 	Name    string
-	Region  string
+	Region  string // vide si Err
 	Created time.Time
+	Err     string // région illisible (droit refusé, bucket supprimé entre-temps…)
 }
 
-// ListBuckets liste tous les buckets du compte, avec leur région.
+// ListBuckets liste tous les buckets du compte, avec leur région. Une région
+// illisible n'arrête pas la liste : elle est notée dans Err.
 func (c *Client) ListBuckets(ctx context.Context) ([]BucketInfo, error) {
 	cl := c.s3("us-east-1")
 	out, err := cl.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return nil, fmt.Errorf("liste des buckets : %w", explain(err))
 	}
-	var res []BucketInfo
-	for _, b := range out.Buckets {
-		bi := BucketInfo{Name: aws.ToString(b.Name), Created: aws.ToTime(b.CreationDate)}
-		loc, err := cl.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: b.Name})
-		if err != nil {
-			return nil, fmt.Errorf("région de %s : %w", bi.Name, explain(err))
-		}
-		bi.Region = string(loc.LocationConstraint)
-		if bi.Region == "" {
-			bi.Region = "us-east-1"
-		}
-		res = append(res, bi)
+	res := make([]BucketInfo, len(out.Buckets))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8) // appels simultanés
+	for i, b := range out.Buckets {
+		res[i] = BucketInfo{Name: aws.ToString(b.Name), Created: aws.ToTime(b.CreationDate)}
+		wg.Add(1)
+		go func(bi *BucketInfo) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			loc, err := cl.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: aws.String(bi.Name)})
+			if err != nil {
+				bi.Err = explain(err).Error()
+				return
+			}
+			bi.Region = string(loc.LocationConstraint)
+			if bi.Region == "" {
+				bi.Region = "us-east-1"
+			}
+		}(&res[i])
 	}
+	wg.Wait()
 	sort.Slice(res, func(i, j int) bool { return res[i].Name < res[j].Name })
 	return res, nil
 }
@@ -106,6 +118,45 @@ type Settings struct {
 	Policy     Policy     `json:"policy"`
 	// ReadErrors : réglages qui n'ont pas pu être lus (droit manquant…), par nom.
 	ReadErrors map[string]string `json:"read_errors,omitempty"`
+	// Kept : réglages illisibles à ce relevé dont la valeur précédente est conservée,
+	// avec la date du relevé qui l'a lue.
+	Kept map[string]time.Time `json:"kept,omitempty"`
+}
+
+// KeepPrevious reprend, pour chaque réglage illisible, la valeur lue par un relevé
+// précédent : une panne passagère ne fait pas disparaître un écart déjà connu.
+func (s *Settings) KeepPrevious(prev Settings) {
+	for name := range s.ReadErrors {
+		if _, unread := prev.ReadErrors[name]; unread {
+			if at, ok := prev.Kept[name]; ok { // déjà reprise : on garde la date d'origine
+				s.keep(name, prev, at)
+			}
+			continue
+		}
+		if prev.ReadAt.IsZero() {
+			continue
+		}
+		s.keep(name, prev, prev.ReadAt)
+	}
+}
+
+func (s *Settings) keep(name string, prev Settings, at time.Time) {
+	switch name {
+	case "versioning":
+		s.Versioning = prev.Versioning
+	case "object_lock":
+		s.ObjectLock = prev.ObjectLock
+	case "lifecycle":
+		s.Lifecycle = prev.Lifecycle
+	case "policy":
+		s.Policy = prev.Policy
+	default:
+		return
+	}
+	if s.Kept == nil {
+		s.Kept = map[string]time.Time{}
+	}
+	s.Kept[name] = at
 }
 
 // ObjectLock résume la configuration Object Lock.
@@ -229,20 +280,31 @@ func wholeBucket(r types.LifecycleRule) bool {
 		f.ObjectSizeGreaterThan == nil && f.ObjectSizeLessThan == nil
 }
 
-// summarizePolicy repère dans une stratégie de bucket les deux refus du modèle.
+// summarizePolicy repère dans une stratégie de bucket les deux refus du modèle :
+// refus du HTTP non chiffré (condition aws:SecureTransport = false) et refus sans
+// condition de la suppression de versions.
 func summarizePolicy(doc string) Policy {
 	p := Policy{Present: strings.TrimSpace(doc) != ""}
 	var d struct {
-		Statement []struct {
-			Effect    string          `json:"Effect"`
-			Action    json.RawMessage `json:"Action"`
-			Condition map[string]map[string]any
-		} `json:"Statement"`
+		Statement json.RawMessage `json:"Statement"`
 	}
 	if err := json.Unmarshal([]byte(doc), &d); err != nil {
 		return p
 	}
-	for _, s := range d.Statement {
+	type statement struct {
+		Effect    string                    `json:"Effect"`
+		Action    json.RawMessage           `json:"Action"`
+		Condition map[string]map[string]any `json:"Condition"`
+	}
+	var stmts []statement
+	if json.Unmarshal(d.Statement, &stmts) != nil {
+		var one statement // Statement peut être un objet unique
+		if json.Unmarshal(d.Statement, &one) != nil {
+			return p
+		}
+		stmts = []statement{one}
+	}
+	for _, s := range stmts {
 		if !strings.EqualFold(s.Effect, "Deny") {
 			continue
 		}
@@ -251,19 +313,37 @@ func summarizePolicy(doc string) Policy {
 				continue
 			}
 			for k, v := range kv {
-				if strings.EqualFold(k, "aws:SecureTransport") && strings.EqualFold(fmt.Sprint(v), "false") {
+				if strings.EqualFold(k, "aws:SecureTransport") && isFalse(v) {
 					p.DenyInsecureTransport = true
 				}
 			}
 		}
+		// Un refus conditionnel (HTTP seulement, adresse IP…) laisse la suppression
+		// possible hors de la condition : il ne compte pas.
+		if len(s.Condition) > 0 {
+			continue
+		}
 		for _, a := range actions(s.Action) {
-			a = strings.ToLower(a)
-			if a == "s3:deleteobjectversion" || a == "s3:*" || a == "s3:delete*" {
+			switch strings.ToLower(a) {
+			case "s3:deleteobjectversion", "s3:*", "s3:delete*", "*":
 				p.DenyVersionDeletion = true
 			}
 		}
 	}
 	return p
+}
+
+// isFalse : "false", false ou ["false"].
+func isFalse(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.EqualFold(x, "false")
+	case bool:
+		return !x
+	case []any:
+		return len(x) == 1 && isFalse(x[0])
+	}
+	return false
 }
 
 func actions(raw json.RawMessage) []string {

@@ -114,6 +114,16 @@ func (r *Runner) Refresh(ctx context.Context) (Report, error) {
 // AuditBucket relève les réglages d'un bucket et enregistre les écarts au modèle.
 func (r *Runner) AuditBucket(ctx context.Context, name, region string) error {
 	s := r.Account.ReadSettings(ctx, name, region)
+	if len(s.ReadErrors) > 0 {
+		// Réglage illisible (panne passagère, droit retiré) : l'écart déjà connu reste
+		// affiché, évalué sur la dernière valeur lue.
+		if b, err := r.Store.Bucket(ctx, name); err == nil && b.SettingsJSON != "" {
+			var prev wasabi.Settings
+			if json.Unmarshal([]byte(b.SettingsJSON), &prev) == nil {
+				s.KeepPrevious(prev)
+			}
+		}
+	}
 	dev := r.Template.Audit(s)
 	sj, _ := json.Marshal(s)
 	dj, _ := json.Marshal(dev)
@@ -157,7 +167,7 @@ func (r *Runner) CollectBucket(ctx context.Context, name string) (int, error) {
 	}
 	rows := make([]store.Usage, 0, len(days))
 	for _, d := range days {
-		rows = append(rows, store.Usage{Bucket: name, Day: d.Day, ActiveBytes: d.RawBytes, PaddedBytes: d.PaddedBytes,
+		rows = append(rows, store.Usage{Bucket: name, Day: d.Day, ActiveBytes: d.RawBytes, PaddedBytes: d.PaddedBytes, MetadataBytes: d.MetadataBytes,
 			DeletedBytes: d.DeletedBytes, Objects: d.Objects, DeletedObjects: d.DeletedObjects,
 			UploadBytes: d.UploadBytes, DownloadBytes: d.DownloadBytes})
 	}

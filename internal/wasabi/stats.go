@@ -20,6 +20,7 @@ type DailyUsage struct {
 	Day            string // YYYY-MM-DD, jour de début de la mesure (UTC)
 	RawBytes       int64  // RawStorageSizeBytes
 	PaddedBytes    int64  // PaddedStorageSizeBytes : base de la facturation
+	MetadataBytes  int64  // MetadataStorageSizeBytes : facturé avec le stockage actif
 	DeletedBytes   int64  // DeletedStorageSizeBytes : supprimé avant 90 jours, encore facturé
 	Objects        int64  // NumBillableObjects
 	DeletedObjects int64  // NumBillableDeletedObjects
@@ -33,6 +34,7 @@ type statsRecord struct {
 	Bucket                    string `json:"Bucket"`
 	RawStorageSizeBytes       int64  `json:"RawStorageSizeBytes"`
 	PaddedStorageSizeBytes    int64  `json:"PaddedStorageSizeBytes"`
+	MetadataStorageSizeBytes  int64  `json:"MetadataStorageSizeBytes"`
 	DeletedStorageSizeBytes   int64  `json:"DeletedStorageSizeBytes"`
 	NumBillableObjects        int64  `json:"NumBillableObjects"`
 	NumBillableDeletedObjects int64  `json:"NumBillableDeletedObjects"`
@@ -95,7 +97,8 @@ func (c *Client) BucketDaily(ctx context.Context, bucket, from, to string) ([]Da
 				return nil, err
 			}
 			out = append(out, DailyUsage{Day: day, RawBytes: r.RawStorageSizeBytes, PaddedBytes: r.PaddedStorageSizeBytes,
-				DeletedBytes: r.DeletedStorageSizeBytes, Objects: r.NumBillableObjects, DeletedObjects: r.NumBillableDeletedObjects,
+				MetadataBytes: r.MetadataStorageSizeBytes,
+				DeletedBytes:  r.DeletedStorageSizeBytes, Objects: r.NumBillableObjects, DeletedObjects: r.NumBillableDeletedObjects,
 				UploadBytes: r.UploadBytes, DownloadBytes: r.DownloadBytes})
 		}
 		if len(p.Records) == 0 || page+1 >= p.PageInfo.PageCount {

@@ -8,7 +8,6 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -106,11 +105,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, v v
 	}
 	if sess := sessionOf(r); sess != nil {
 		v.CSRF = sess.csrf
+		if v.Notice == "" {
+			v.Notice = s.takeFlash(sess)
+		}
 	}
 	v.Version = s.Version
-	if v.Notice == "" {
-		v.Notice = r.URL.Query().Get("ok")
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.Execute(w, v); err != nil {
 		s.Log.Error("rendu", "page", page, "err", err)
@@ -130,7 +129,12 @@ func (s *Server) pricing(ctx context.Context) jobs.Pricing {
 // --- premier lancement et déverrouillage ---------------------------------------
 
 func (s *Server) setupPage(w http.ResponseWriter, r *http.Request) {
-	if ok, _ := s.Vault.Exists(); ok {
+	ok, err := s.Vault.Exists()
+	switch {
+	case err != nil:
+		s.render(w, r, "setup", view{Title: "Première configuration", Error: err.Error()})
+		return
+	case ok:
 		redirect(w, r, "/unlock")
 		return
 	}
@@ -138,7 +142,11 @@ func (s *Server) setupPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
-	if ok, _ := s.Vault.Exists(); ok {
+	// Trousseau en erreur : on ne sait pas si un coffre existe, on n'écrase rien.
+	if ok, err := s.Vault.Exists(); err != nil {
+		s.render(w, r, "setup", view{Title: "Première configuration", Error: err.Error()})
+		return
+	} else if ok {
 		http.Error(w, "console déjà configurée", http.StatusConflict)
 		return
 	}
@@ -164,6 +172,10 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 		again("Prix au To invalide.")
 		return
 	}
+	if err := s.Vault.Probe(); err != nil {
+		again(err.Error())
+		return
+	}
 	// La clé doit fonctionner avant d'être rangée : liste des buckets (lecture seule).
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -177,9 +189,10 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.Store.SetSetting(r.Context(), setPrice, price)
 	_ = s.Store.SetSetting(r.Context(), setCurrency, "$")
+	s.configured.Store(true)
 	_ = s.Store.Audit(r.Context(), "configuration initiale", "console", store.ResultOK, "clé d'administration "+maskKey(k.AccessKeyID))
-	s.startSession(w, k)
-	redirect(w, r, "/buckets?ok="+urlq("Console configurée. Importez vos buckets."))
+	s.startSession(w, k, "Console configurée. Importez vos buckets.")
+	redirect(w, r, "/buckets")
 }
 
 func (s *Server) unlockPage(w http.ResponseWriter, r *http.Request) {
@@ -194,17 +207,13 @@ func (s *Server) unlockPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unlockSubmit(w http.ResponseWriter, r *http.Request) {
-	if err := s.throttle(); err != nil {
-		s.render(w, r, "unlock", view{Title: "Déverrouiller", Error: err.Error()})
-		return
-	}
-	k, err := s.Vault.Unlock(r.PostFormValue("password"))
+	k, err := s.tryPassword(r.PostFormValue("password"))
 	switch {
 	case errors.Is(err, secrets.ErrNotSetUp):
+		s.configured.Store(false)
 		redirect(w, r, "/setup")
 		return
 	case errors.Is(err, secrets.ErrWrongPassword):
-		s.passwordFailed()
 		_ = s.Store.Audit(r.Context(), "déverrouillage", "console", store.ResultError, "mot de passe incorrect")
 		s.render(w, r, "unlock", view{Title: "Déverrouiller", Error: "Mot de passe incorrect."})
 		return
@@ -212,9 +221,8 @@ func (s *Server) unlockSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "unlock", view{Title: "Déverrouiller", Error: err.Error()})
 		return
 	}
-	s.passwordOK()
 	_ = s.Store.Audit(r.Context(), "déverrouillage", "console", store.ResultOK, "")
-	s.startSession(w, k)
+	s.startSession(w, k, "")
 	redirect(w, r, "/")
 }
 
@@ -230,8 +238,6 @@ func maskKey(id string) string {
 	}
 	return id[:4] + "…" + id[len(id)-2:]
 }
-
-func urlq(s string) string { return url.QueryEscape(s) }
 
 // --- vue d'ensemble ----------------------------------------------------------------
 
@@ -266,7 +272,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() {
-		if _, err := o.runner.Refresh(context.Background()); err != nil && !errors.Is(err, jobs.ErrBusy) {
+		if _, err := o.runner.Refresh(o.ctx); err != nil && !errors.Is(err, jobs.ErrBusy) {
 			s.Log.Warn("actualisation", "err", err)
 		}
 	}()
@@ -332,7 +338,12 @@ func (s *Server) importBucket(w http.ResponseWriter, r *http.Request) {
 	name, client := trim(r, "bucket"), strings.ToLower(trim(r, "client_code"))
 	clientName, poste := trim(r, "client_name"), trim(r, "poste")
 	if !codePattern.MatchString(client) {
-		redirect(w, r, "/buckets?ok="+urlq("Code client invalide : minuscules, chiffres et tirets, 20 caractères au plus."))
+		s.flash(r, "Code client invalide : minuscules, chiffres et tirets, 20 caractères au plus.")
+		redirect(w, r, "/buckets")
+		return
+	}
+	if _, err := s.Store.Bucket(ctx, name); err == nil { // double clic, second onglet…
+		redirect(w, r, "/buckets/"+name)
 		return
 	}
 	if clientName == "" {
@@ -352,8 +363,13 @@ func (s *Server) importBucket(w http.ResponseWriter, r *http.Request) {
 			info = &all[i]
 		}
 	}
-	if info == nil {
-		http.Error(w, "bucket inconnu du compte Wasabi", http.StatusBadRequest)
+	if info == nil || info.Err != "" {
+		msg := "Bucket inconnu du compte Wasabi : " + name
+		if info != nil {
+			msg = "Région du bucket " + name + " illisible : " + info.Err
+		}
+		s.flash(r, msg)
+		redirect(w, r, "/buckets")
 		return
 	}
 	if err := s.Store.EnsureClient(ctx, store.Client{Code: client, Name: clientName}); err != nil {
@@ -371,12 +387,13 @@ func (s *Server) importBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Relevé et collecte tout de suite, en arrière-plan (un an d'historique).
+	// Interrompus si la console est verrouillée entre-temps (o.ctx).
 	go func() {
-		bg := context.Background()
-		_ = o.runner.AuditBucket(bg, info.Name, info.Region)
-		_, _ = o.runner.CollectBucket(bg, info.Name)
+		_ = o.runner.AuditBucket(o.ctx, info.Name, info.Region)
+		_, _ = o.runner.CollectBucket(o.ctx, info.Name)
 	}()
-	redirect(w, r, "/buckets/"+name+"?ok="+urlq("Bucket importé : relevé des réglages et collecte d'un an d'usage en cours."))
+	s.flash(r, "Bucket importé : relevé des réglages et collecte d'un an d'usage en cours.")
+	redirect(w, r, "/buckets/"+name)
 }
 
 type bucketData struct {
@@ -428,7 +445,8 @@ func (s *Server) auditBucket(w http.ResponseWriter, r *http.Request) {
 	if err := o.runner.AuditBucket(ctx, b.Name, b.Region); err != nil {
 		msg = "Relevé incomplet : " + err.Error()
 	}
-	redirect(w, r, "/buckets/"+b.Name+"?ok="+urlq(msg))
+	s.flash(r, msg)
+	redirect(w, r, "/buckets/"+b.Name)
 }
 
 // usageJSON alimente les graphiques : ?bucket=<nom> (vide : tous), ?days=<n>.
@@ -452,7 +470,8 @@ func (s *Server) usageJSON(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]point, 0, len(rows))
 	for _, u := range rows {
-		out = append(out, point{u.Day, u.Bucket, float64(u.PaddedBytes) / 1e9, float64(u.DeletedBytes) / 1e9, float64(u.ActiveBytes) / 1e9})
+		const gib = 1 << 30 // Go de facturation Wasabi (1024³ octets)
+		out = append(out, point{u.Day, u.Bucket, float64(u.PaddedBytes+u.MetadataBytes) / gib, float64(u.DeletedBytes) / gib, float64(u.ActiveBytes) / gib})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
@@ -484,7 +503,8 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 	_ = s.Store.SetSetting(ctx, setPrice, price)
 	_ = s.Store.SetSetting(ctx, setCurrency, cur)
 	_ = s.Store.Audit(ctx, "réglages", "tarif", store.ResultOK, price+" "+cur+" par To et par mois")
-	redirect(w, r, "/settings?ok="+urlq("Réglages enregistrés."))
+	s.flash(r, "Réglages enregistrés.")
+	redirect(w, r, "/settings")
 }
 
 func (s *Server) passwordSubmit(w http.ResponseWriter, r *http.Request) {
@@ -492,13 +512,12 @@ func (s *Server) passwordSubmit(w http.ResponseWriter, r *http.Request) {
 	again := func(msg string) {
 		s.render(w, r, "settings", view{Title: "Réglages", Nav: "settings", Error: msg, Data: s.pricing(ctx)})
 	}
-	if err := s.throttle(); err != nil {
+	k, err := s.tryPassword(r.PostFormValue("current"))
+	if errors.Is(err, errThrottled) {
 		again(err.Error())
 		return
 	}
-	k, err := s.Vault.Unlock(r.PostFormValue("current"))
 	if err != nil {
-		s.passwordFailed()
 		_ = s.Store.Audit(ctx, "changement du mot de passe maître", "console", store.ResultError, "mot de passe actuel incorrect")
 		again("Mot de passe actuel incorrect.")
 		return
@@ -512,7 +531,7 @@ func (s *Server) passwordSubmit(w http.ResponseWriter, r *http.Request) {
 		again(err.Error())
 		return
 	}
-	s.passwordOK()
 	_ = s.Store.Audit(ctx, "changement du mot de passe maître", "console", store.ResultOK, "")
-	redirect(w, r, "/settings?ok="+urlq("Mot de passe maître changé."))
+	s.flash(r, "Mot de passe maître changé.")
+	redirect(w, r, "/settings")
 }

@@ -39,6 +39,7 @@ func run() int {
 	dataDir := flag.String("data", filepath.Join(def, "kura-ctl"), "dossier de données (base, journal)")
 	port := flag.String("port", "0", "port local (0 : port libre)")
 	noBrowser := flag.Bool("no-browser", false, "ne pas ouvrir le navigateur")
+	plainHost := flag.Bool("plain-host", false, "servir sur http://127.0.0.1:<port> plutôt que sous un nom aléatoire en .localhost (navigateur qui ne le résout pas)")
 	reset := flag.Bool("reset", false, "effacer la clé d'administration du trousseau (mot de passe maître oublié)")
 	showVersion := flag.Bool("version", false, "afficher la version")
 	flag.Parse()
@@ -82,7 +83,7 @@ func run() int {
 		return 0
 	}
 
-	srv := &web.Server{Store: st, Vault: vault, Log: log, Version: version}
+	srv := &web.Server{Store: st, Vault: vault, Log: log, Version: version, PlainHost: *plainHost}
 	ln, err := srv.Listen(*port)
 	if err != nil {
 		log.Error("écoute", "err", err)
@@ -104,9 +105,13 @@ func run() int {
 		_ = hs.Shutdown(sctx)
 	}()
 
-	url := "http://" + ln.Addr().String() + "/"
+	url := srv.URL()
 	log.Info("console prête", "adresse", url, "données", *dataDir, "version", version)
-	fmt.Printf("\nKura ctl : %s\n(Ctrl+C pour arrêter)\n\n", url)
+	fmt.Printf("\nKura ctl : %s\n(Ctrl+C pour arrêter)\n", url)
+	if !*plainHost {
+		fmt.Println("Si le navigateur ne trouve pas cette adresse, relancer avec --plain-host.")
+	}
+	fmt.Println()
 	if !*noBrowser {
 		if err := openBrowser(url); err != nil {
 			log.Warn("navigateur non ouvert : ouvrir l'adresse à la main", "err", err)
@@ -120,12 +125,18 @@ func run() int {
 }
 
 func openBrowser(url string) error {
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
-		return exec.Command("open", url).Start()
+		cmd = exec.Command("open", url)
 	default:
-		return exec.Command("xdg-open", url).Start()
+		cmd = exec.Command("xdg-open", url)
 	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait() // pas de processus zombie
+	return nil
 }

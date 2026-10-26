@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeS3 répond comme Wasabi en adressage par chemin : /<bucket>?<sous-ressource>.
@@ -211,5 +212,52 @@ func TestBucketDaily(t *testing.T) {
 	statsBase = denied.URL
 	if _, err := c.BucketDaily(context.Background(), "x", "2026-10-01", "2026-10-02"); err == nil || !strings.Contains(err.Error(), "WasabiBucketStatsAccess") {
 		t.Fatalf("refus : %v", err)
+	}
+}
+
+func TestSummarizePolicyCases(t *testing.T) {
+	cases := []struct {
+		name          string
+		doc           string
+		https, delver bool
+	}{
+		{"https seul : le refus s3:* conditionnel ne protège pas les versions",
+			`{"Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:*","Resource":"*","Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}`, true, false},
+		{"Statement en objet unique",
+			`{"Statement":{"Effect":"Deny","Principal":"*","Action":"s3:DeleteObjectVersion","Resource":"*"}}`, false, true},
+		{"condition en tableau",
+			`{"Statement":[{"Effect":"Deny","Action":["s3:*"],"Condition":{"Bool":{"aws:SecureTransport":["false"]}}}]}`, true, false},
+		{"booléen JSON",
+			`{"Statement":[{"Effect":"Deny","Action":"s3:*","Condition":{"Bool":{"aws:SecureTransport":false}}}]}`, true, false},
+		{"Action *",
+			`{"Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}`, false, true},
+		{"Allow ignoré",
+			`{"Statement":[{"Effect":"Allow","Action":"s3:DeleteObjectVersion"}]}`, false, false},
+	}
+	for _, c := range cases {
+		p := summarizePolicy(c.doc)
+		if !p.Present || p.DenyInsecureTransport != c.https || p.DenyVersionDeletion != c.delver {
+			t.Errorf("%s : %+v", c.name, p)
+		}
+	}
+}
+
+func TestKeepPrevious(t *testing.T) {
+	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	prev := Settings{ReadAt: at, Versioning: "Suspended", Policy: Policy{Present: true}}
+	cur := Settings{ReadAt: at.AddDate(0, 0, 1), ReadErrors: map[string]string{"versioning": "délai dépassé"}}
+	cur.KeepPrevious(prev)
+	if cur.Versioning != "Suspended" || !cur.Kept["versioning"].Equal(at) {
+		t.Fatalf("valeur non reprise : %+v", cur)
+	}
+	d := Standard.Audit(cur)
+	if d[0].Severity != Critical || d[0].Code != "versioning" {
+		t.Fatalf("écart critique perdu : %+v", d)
+	}
+	// Deuxième relevé illisible : la date d'origine est conservée.
+	next := Settings{ReadAt: at.AddDate(0, 0, 2), ReadErrors: map[string]string{"versioning": "délai dépassé"}}
+	next.KeepPrevious(cur)
+	if !next.Kept["versioning"].Equal(at) || next.Versioning != "Suspended" {
+		t.Fatalf("seconde reprise : %+v", next)
 	}
 }

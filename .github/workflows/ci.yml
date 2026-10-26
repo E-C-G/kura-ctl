@@ -33,8 +33,14 @@ jobs:
           if [ ! -f go.sum ]; then
             echo "::warning title=go.sum absent::go.sum n'est pas commité ; il est généré pour ce build (modules vérifiés contre sum.golang.org). Lancer 'go mod tidy' et commiter go.sum."
             go mod tidy
-            # Contenu généré, affiché en annotation pour pouvoir le commiter tel quel.
-            echo "::notice title=go.sum généré::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' go.sum)"
+            # Contenu généré, affiché en annotations (par blocs de 25 lignes, une
+            # annotation étant limitée à 4 Ko) pour pouvoir le commiter tel quel.
+            for f in go.mod go.sum; do
+              split -l 25 -d "$f" "/tmp/$f.part."
+              for part in /tmp/$f.part.*; do
+                echo "::notice title=$f généré ${part##*.}::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' "$part")"
+              done
+            done
           else
             go mod tidy -diff
           fi
