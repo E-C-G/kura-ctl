@@ -237,6 +237,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	app.HandleFunc("POST /refresh", s.refresh)
 	app.HandleFunc("GET /buckets", s.bucketsPage)
 	app.HandleFunc("POST /buckets/import", s.importBucket)
+	app.HandleFunc("POST /buckets/creer", s.createBucket)
 	app.HandleFunc("GET /buckets/{name}", s.bucketPage)
 	app.HandleFunc("POST /buckets/{name}/audit", s.auditBucket)
 	app.HandleFunc("GET /api/usage", s.usageJSON)

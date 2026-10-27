@@ -112,6 +112,16 @@ const f = process.argv[2];
     await ldl.saveAs(f + '-ubuntu.zip');
     const lzip = fs.readFileSync(f + '-ubuntu.zip').toString('latin1');
     console.log('23. kit Ubuntu téléchargé', ldl.suggestedFilename(), lzip.includes('kura-agent_0.7.0_amd64.deb'), lzip.includes('awscli-exe-linux-x86_64.zip.sig'), !lzip.includes('AWSCLIV2.msi'));
+
+    // Lot 4 : création d'un bucket depuis le modèle.
+    await page.goto(base + 'buckets');
+    await page.fill('form.create input[name=client_code]', 'acme');
+    await page.fill('form.create input[name=poste]', 'Portable 02');
+    await page.selectOption('form.create select[name=region]', 'eu-central-2');
+    await Promise.all([page.waitForNavigation(), page.click('text=Créer le bucket')]);
+    const cbody = await page.textContent('body');
+    console.log('24. bucket créé', page.url().endsWith('/buckets/kura-acme-portable-02'), cbody.includes('relecture conforme'));
+    await page.screenshot({ path: f + '-creation.png', fullPage: true });
   } catch (e) {
     console.log('ÉCHEC', e.message, page.url());
     console.log((await page.textContent('body')).slice(0, 400));

@@ -26,7 +26,7 @@
     {{range $d.Deviations}}
       <div class="dev {{sevclass .Severity}}"><span class="badge {{sevclass .Severity}}">{{.Severity}}</span> {{.Message}}<div class="hint">{{.Fix}}</div></div>
     {{else}}<p><span class="badge ok">conforme</span> Aucun écart.</p>{{end}}
-    <p class="hint">Relevé le {{datetime $d.AuditedAt}}. Ce qui se corrige après coup se règle dans « Sécuriser le bucket » ci-dessous ; Object Lock demande un bucket neuf (lot 4).</p>
+    <p class="hint">Relevé le {{datetime $d.AuditedAt}}. Ce qui se corrige après coup se règle dans « Sécuriser le bucket » ci-dessous ; Object Lock demande un bucket neuf (<a href="/buckets">Buckets → Créer un bucket</a>).</p>
     {{end}}
   </div>
   <div>
@@ -55,7 +55,7 @@
   <table class="kv">
     <tr><th>Stratégie de bucket</th><td>{{if index $d.Fixes "strategie"}}<a href="/buckets/{{$d.Name}}/corriger/strategie">Voir et appliquer la stratégie du modèle</a>{{else}}<span class="badge ok">conforme</span> <a class="muted" href="/buckets/{{$d.Name}}/corriger/strategie">réappliquer</a>{{end}}</td></tr>
     <tr><th>Cycle de vie</th><td>{{if index $d.Fixes "cycle-de-vie"}}<a href="/buckets/{{$d.Name}}/corriger/cycle-de-vie">Voir et appliquer le cycle de vie du modèle</a>{{else}}<span class="badge ok">conforme</span>{{end}}</td></tr>
-    <tr><th>Rétention par défaut</th><td>{{if index $d.Fixes "retention"}}<a href="/buckets/{{$d.Name}}/corriger/retention">Voir et appliquer la rétention du modèle</a>{{else if and $d.Settings $d.Settings.ObjectLock.Enabled}}<span class="badge ok">conforme</span>{{else}}<span class="muted">Object Lock absent : bucket neuf nécessaire (lot 4)</span>{{end}}</td></tr>
+    <tr><th>Rétention par défaut</th><td>{{if index $d.Fixes "retention"}}<a href="/buckets/{{$d.Name}}/corriger/retention">Voir et appliquer la rétention du modèle</a>{{else if and $d.Settings $d.Settings.ObjectLock.Enabled}}<span class="badge ok">conforme</span>{{else}}<span class="muted">Object Lock absent : bucket neuf nécessaire (<a href="/buckets">Créer un bucket</a>)</span>{{end}}</td></tr>
   </table>
   {{end}}
 

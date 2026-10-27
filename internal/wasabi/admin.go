@@ -33,6 +33,7 @@ type Admin interface {
 	PutBucketPolicy(ctx context.Context, bucket, region, doc string) error
 	PutLifecycle(ctx context.Context, bucket, region string, t Template) error
 	PutDefaultRetention(ctx context.Context, bucket, region, mode string, days int) error
+	CreateBucket(ctx context.Context, name, region string) error
 	EnsureUser(ctx context.Context, name string) (created bool, err error)
 	CheckPosteUser(ctx context.Context, user, bucket string) error
 	PutUserPolicy(ctx context.Context, user, name, doc string) error
@@ -439,10 +440,11 @@ func PostePolicy(bucket string) string {
 }
 
 // AdminPolicy est la stratégie à donner à l'utilisateur de la console (kura-ctl-admin),
-// avec la stratégie gérée WasabiBucketStatsAccess. Seuls les droits dont le lot 2 se
-// sert : gérer les utilisateurs kura-* et leurs clés, lire et écrire les réglages des
-// buckets (stratégie, cycle de vie, rétention par défaut). Ni lecture des données, ni
-// création ou suppression de bucket, ni contournement de rétention.
+// avec la stratégie gérée WasabiBucketStatsAccess. Seuls les droits dont la console se
+// sert : gérer les utilisateurs kura-* et leurs clés, créer un bucket (avec Object
+// Lock et versioning, lot 4), lire et écrire les réglages des buckets (stratégie,
+// cycle de vie, rétention par défaut). Ni lecture des données, ni suppression de
+// bucket, ni contournement de rétention.
 //
 // Limite à connaître : pouvoir poser la stratégie d'un utilisateur kura-* permet à
 // qui détient cette clé de créer un utilisateur aux droits étendus, et poser une
@@ -464,7 +466,7 @@ func AdminPolicy() string {
 				"iam:CreateLoginProfile", "iam:UpdateLoginProfile", "iam:AddUserToGroup"},
 			Resource: []string{"arn:aws:iam::*:user/kura-ctl*"}},
 		{Sid: "ReglerLesBuckets", Effect: "Allow",
-			Action: []string{"s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetBucketVersioning",
+			Action: []string{"s3:ListAllMyBuckets", "s3:CreateBucket", "s3:GetBucketLocation", "s3:GetBucketVersioning", "s3:PutBucketVersioning",
 				"s3:GetBucketObjectLockConfiguration", "s3:PutBucketObjectLockConfiguration",
 				"s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
 				"s3:GetBucketPolicy", "s3:PutBucketPolicy"},

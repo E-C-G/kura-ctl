@@ -10,7 +10,7 @@ puis corrige ces réglages, crée la clé limitée de chaque poste et prépare s
 | 1 « Observer » | usage, coûts, audit des réglages, journal ; aucune écriture chez Wasabi | **fait** |
 | 2 « Sécuriser l'existant » | clé `kura-ctl-admin`, stratégie de bucket, cycle de vie, rétention, clé de poste et paquet `.kura` | **fait** |
 | 3 « Préparer les postes » | configuration du poste, paquet d'installation complète, kit zip (kura-agent, CLI AWS) pour Windows et Ubuntu, rotation guidée | **fait** |
-| 4 « Créer proprement » | bucket neuf depuis le modèle, avec Object Lock | à faire |
+| 4 « Créer proprement » | bucket neuf depuis le modèle, avec Object Lock | **fait** |
 
 Toute écriture chez Wasabi passe par un aperçu de ce qui sera écrit, la saisie du nom du
 bucket, puis une relecture du réglage chez Wasabi ; le résultat va au journal d'audit.
@@ -195,8 +195,10 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
       "Effect": "Allow",
       "Action": [
         "s3:ListAllMyBuckets",
+        "s3:CreateBucket",
         "s3:GetBucketLocation",
         "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
         "s3:GetBucketObjectLockConfiguration",
         "s3:PutBucketObjectLockConfiguration",
         "s3:GetLifecycleConfiguration",
@@ -213,8 +215,13 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
 ```
 
 - Seulement les droits dont la console se sert : utilisateurs `kura-*` et leurs clés,
-  stratégie, cycle de vie et rétention par défaut des buckets. Ni lecture des données
-  (`GetObject`…), ni création ou suppression de bucket, ni contournement de rétention.
+  création d'un bucket (avec Object Lock et versioning, lot 4), stratégie, cycle de vie et
+  rétention par défaut des buckets. Ni lecture des données (`GetObject`…), ni suppression de
+  bucket, ni contournement de rétention.
+- **Mise à jour pour le lot 4** : une stratégie `kura-ctl-admin` créée avant la v0.5.0 n'a pas
+  `s3:CreateBucket` ni `s3:PutBucketVersioning` ; les ajouter dans Wasabi (*Policies →
+  kura-ctl-admin*) pour créer des buckets depuis la console. Sans eux, la création est refusée
+  avec ce message, rien d'autre ne change.
 - Refus explicite sur `kura-ctl*` : la console ne peut pas modifier son propre utilisateur.
 - **Limite à connaître** : qui peut poser la stratégie d'un utilisateur `kura-*` peut créer un
   utilisateur aux droits étendus, et qui peut poser une stratégie de bucket peut s'ouvrir les
@@ -222,6 +229,26 @@ bucket l'indique (« lecture refusée ») au lieu d'afficher un faux écart.
   verrouillées en mode conformité (COMPLIANCE) y résistent. Elle ne vit que chiffrée dans le
   trousseau du poste de l'éditeur, derrière le mot de passe maître : disque chiffré et session
   verrouillée sur ce poste.
+
+## Créer un bucket (lot 4)
+
+Page *Buckets*, section *Créer un bucket* : code et nom du client, poste, région, et
+éventuellement le nom du bucket (vide : `kura-<client>-<poste>`, en minuscules). La console :
+
+1. crée le bucket **avec Object Lock**, seul moment où il peut être activé (il ne pourra plus
+   être retiré), et active le versioning ;
+2. le suit tout de suite (import) : si un réglage échoue ensuite, il reste visible avec ses
+   écarts et se corrige depuis *Sécuriser le bucket* ;
+3. pose les réglages du modèle « sauvegarde standard » : rétention par défaut (GOVERNANCE,
+   30 jours), cycle de vie (anciennes versions 90 jours, marqueurs orphelins, envois
+   interrompus 7 jours) ;
+4. crée l'utilisateur du poste `kura-<bucket>` (sans clé : elle est créée avec le paquet) et sa
+   stratégie, puis la stratégie de bucket qui lui refuse la suppression de versions ;
+5. relit les réglages chez Wasabi et affiche les écarts au modèle (aucun attendu).
+
+Chaque réglage est réessayé quelques secondes si Wasabi ne voit pas encore le bucket neuf. Un
+nom déjà pris (les noms de bucket sont uniques pour tout Wasabi) est refusé sans rien créer.
+Tout est noté dans le journal d'audit. Le formulaire ne sert qu'une fois (double clic).
 
 ## Sécuriser un bucket existant (lot 2)
 

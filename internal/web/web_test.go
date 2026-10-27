@@ -66,6 +66,8 @@ type fakeAccount struct {
 	used     map[string]time.Time // clé → dernière utilisation
 	usedErr  error                // GetAccessKeyLastUsed indisponible
 	other    map[string]string    // utilisateur → autre droit (stratégie, groupe…)
+	created  []wasabi.BucketInfo  // buckets créés par la console
+	failOn   map[string]error     // écriture à faire échouer (« create », « retention »…)
 }
 
 func newFakeAccount(k wasabi.Keys) *fakeAccount {
@@ -77,7 +79,23 @@ func (f *fakeAccount) ListBuckets(context.Context) ([]wasabi.BucketInfo, error) 
 	if f.keys.SecretAccessKey == "mauvaise" {
 		return nil, io.ErrUnexpectedEOF
 	}
-	return []wasabi.BucketInfo{{Name: "acme-srv01", Region: "eu-central-1", Created: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)}}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]wasabi.BucketInfo{{Name: "acme-srv01", Region: "eu-central-1", Created: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)}}, f.created...), nil
+}
+func (f *fakeAccount) CreateBucket(_ context.Context, name, region string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failOn["create"]; err != nil {
+		return err
+	}
+	if _, ok := f.settings[name]; ok || name == "acme-srv01" {
+		return fmt.Errorf("%s : %w", name, wasabi.ErrBucketTaken)
+	}
+	f.writes = append(f.writes, "create "+name+" "+region)
+	f.created = append(f.created, wasabi.BucketInfo{Name: name, Region: region, Created: time.Now()})
+	f.settings[name] = wasabi.Settings{Versioning: "Enabled", ObjectLock: wasabi.ObjectLock{Enabled: true}}
+	return nil
 }
 func (f *fakeAccount) ReadSettings(_ context.Context, name, region string) wasabi.Settings {
 	f.mu.Lock()
@@ -140,6 +158,9 @@ func (f *fakeAccount) PutLifecycle(_ context.Context, bucket, _ string, t wasabi
 	})
 }
 func (f *fakeAccount) PutDefaultRetention(_ context.Context, bucket, _, mode string, days int) error {
+	if err := f.failOn["retention"]; err != nil {
+		return err
+	}
 	f.writes = append(f.writes, "retention "+bucket)
 	return f.edit(bucket, func(s *wasabi.Settings) error {
 		if !s.ObjectLock.Enabled {

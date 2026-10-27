@@ -220,7 +220,7 @@ func (s *Server) fixFor(ctx context.Context, o *unlocked, b store.Bucket, what s
 		if _, unread := st.ReadErrors["object_lock"]; unread {
 			v.Blocked = "Object Lock illisible : impossible de montrer ce qui serait remplacé"
 		} else if !st.ObjectLock.Enabled {
-			v.Blocked = "Object Lock n'est pas activé sur ce bucket : il ne s'active qu'à la création (bucket neuf, lot 4)"
+			v.Blocked = "Object Lock n'est pas activé sur ce bucket : il ne s'active qu'à la création : créer un bucket neuf (page Buckets, Créer un bucket) et y basculer le poste"
 		}
 		v.Notes = []string{"S'applique aux objets envoyés ensuite ; les objets déjà présents restent sans verrou."}
 		if t.ObjectLockMode == "COMPLIANCE" {
