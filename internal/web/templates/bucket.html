@@ -62,7 +62,7 @@
   <h2>Configuration du poste</h2>
   <p>{{if not $d.PosteCfg.Saved}}<span class="muted">Aucune configuration préparée dans la console.</span> <a href="/buckets/{{$d.Name}}/poste">Préparer la configuration du poste</a>
     {{else if $d.PosteCfg.Err}}<span class="badge sev-haute">à corriger</span> enregistrée le {{date $d.PosteCfg.UpdatedAt}} · <a href="/buckets/{{$d.Name}}/poste">corriger</a>
-    {{else}}<span class="badge ok">prête</span> enregistrée le {{datetime $d.PosteCfg.UpdatedAt}} · {{len $d.PosteCfg.Checked.Config.Jobs}} job(s) · <a href="/buckets/{{$d.Name}}/poste">voir ou modifier</a>{{end}}</p>
+    {{else}}<span class="badge ok">prête</span> enregistrée le {{datetime $d.PosteCfg.UpdatedAt}} · {{$d.Platform.Label}} · {{len $d.PosteCfg.Checked.Config.Jobs}} job(s) · <a href="/buckets/{{$d.Name}}/poste">voir ou modifier</a>{{end}}</p>
 
   <h2 id="cles">Clés du poste</h2>
   {{with $d.Keys.Error}}<p class="flash error">{{.}}</p>{{end}}
@@ -93,7 +93,7 @@
     <input type="hidden" name="paquet" value="installation">
     <h3>Installation complète du poste</h3>
     {{if and $d.PosteCfg.Saved (not $d.PosteCfg.Err)}}
-    <p class="hint">Crée (si besoin) l'utilisateur <code>{{$d.Keys.UserName}}</code>, limité à ce bucket et sans droit de supprimer une version, puis une clé et un paquet avec la <a href="/buckets/{{$d.Name}}/poste">configuration du poste</a> et ses secrets, remis dans un kit zip (kura-agent, CLI AWS) : sur le poste, <code>kura-agent install --package</code>.</p>
+    <p class="hint">Crée (si besoin) l'utilisateur <code>{{$d.Keys.UserName}}</code>, limité à ce bucket et sans droit de supprimer une version, puis une clé et un paquet avec la <a href="/buckets/{{$d.Name}}/poste">configuration du poste</a> et ses secrets, remis dans un kit zip pour {{$d.Platform.Label}} (kura-agent, CLI AWS) : sur le poste, {{if $d.Platform.Linux}}<code>sudo apt install ./kura-agent_*.deb</code> puis <code>sudo kura-agent install --package</code>{{else}}<code>kura-agent.exe install --package</code>{{end}}.</p>
     <p class="hint">Clé du poste : <code>credential:{{$d.PosteCfg.Checked.KeyName}}</code>.</p>
     {{range $d.PosteCfg.Checked.Secrets}}
     <label>{{.Name}} <span class="hint">({{.Field}}, non conservé par la console)</span><input type="password" name="secret-{{.Name}}" required autocomplete="new-password" spellcheck="false"></label>

@@ -134,10 +134,11 @@ func (o *unlocked) useOnce(t string) bool {
 type pendingPack struct {
 	bucket, keyID, file string
 	data                []byte
-	expires             time.Time // fin du téléchargement possible
-	validUntil          time.Time // fin de validité du paquet sur le poste
-	install             bool      // paquet d'installation complète : kit zip possible
-	busy                bool      // kit en préparation : ni second kit, ni .kura seul
+	expires             time.Time      // fin du téléchargement possible
+	validUntil          time.Time      // fin de validité du paquet sur le poste
+	install             bool           // paquet d'installation complète : kit zip possible
+	platform            store.Platform // système du poste, pour le kit
+	busy                bool           // kit en préparation : ni second kit, ni .kura seul
 }
 
 // identity : utilisateur IAM de la clé d'administration (mis en cache ; un échec

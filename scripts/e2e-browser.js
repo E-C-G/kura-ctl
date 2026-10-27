@@ -87,6 +87,31 @@ const f = process.argv[2];
     await kdl.saveAs(f + '.zip');
     const head = fs.readFileSync(f + '.zip').subarray(0, 2).toString();
     console.log('19. kit téléchargé', kdl.suggestedFilename(), head === 'PK');
+
+    // Poste Ubuntu : modèle Linux, système choisi, kit avec le paquet .deb.
+    await page.goto(base + '/buckets/acme-srv01/poste');
+    await Promise.all([page.waitForNavigation(), page.click('text=Ubuntu 24.04 (amd64)')]);
+    const lyaml = await page.inputValue('textarea[name=yaml]');
+    console.log('20. modèle Ubuntu', lyaml.includes('source: /home/'), await page.inputValue('select[name=platform]'));
+    await Promise.all([page.waitForNavigation(), page.click('text=Vérifier et enregistrer')]);
+    console.log('21. configuration Ubuntu enregistrée', (await page.textContent('body')).includes('Ubuntu 24.04 (amd64)'));
+    // Deux clés au plus chez Wasabi : la plus ancienne est désactivée puis supprimée.
+    const old = 'form[action$="/cles/AKIDPOSTE0001/desactiver"]';
+    await page.fill(old + ' input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click(old + ' button')]);
+    const del = 'form[action$="/cles/AKIDPOSTE0001/supprimer"]';
+    await page.fill(del + ' input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click(del + ' button')]);
+    await page.fill('input[name=secret-hc-url]', 'https://hc-ping.example/uuid-e2e-linux');
+    await page.fill('form:has(input[name=secret-hc-url]) input[name=confirm]', 'acme-srv01');
+    await Promise.all([page.waitForNavigation(), page.click('text=Créer une clé et le kit')]);
+    const lbody = await page.textContent('body');
+    console.log('22. page du kit Ubuntu', lbody.includes('Sur le poste · Ubuntu 24.04 (amd64)'), lbody.includes('sudo apt install'), lbody.includes('sudo kura-agent install --package'), !lbody.includes('kura-agent.exe install'));
+    await page.screenshot({ path: f + '-kit-ubuntu.png', fullPage: true });
+    const [ldl] = await Promise.all([page.waitForEvent('download'), page.click('text=Télécharger le kit')]);
+    await ldl.saveAs(f + '-ubuntu.zip');
+    const lzip = fs.readFileSync(f + '-ubuntu.zip').toString('latin1');
+    console.log('23. kit Ubuntu téléchargé', ldl.suggestedFilename(), lzip.includes('kura-agent_0.7.0_amd64.deb'), lzip.includes('awscli-exe-linux-x86_64.zip.sig'), !lzip.includes('AWSCLIV2.msi'));
   } catch (e) {
     console.log('ÉCHEC', e.message, page.url());
     console.log((await page.textContent('body')).slice(0, 400));

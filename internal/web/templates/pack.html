@@ -14,7 +14,7 @@
       Téléchargeable une seule fois, dans les 30 minutes ; ouvrable sur le poste jusqu'au {{datetime $d.Expires}}.</em></div>
   <div class="tile"><span>Ou le paquet seul</span>
     <a class="button ghost" href="{{$d.URL}}" hx-boost="false" download="{{$d.File}}">Télécharger {{$d.File}}</a>
-    <em>À poser à côté de kura-agent.exe (zip de la release) ; le poste télécharge alors la CLI AWS si elle manque. Exclusif du kit : l'un ou l'autre, une seule fois.</em></div>
+    <em>{{if $d.Linux}}Pour un poste où le paquet .deb de kura-agent est déjà installé{{else}}À poser à côté de kura-agent.exe (zip de la release){{end}} ; le poste télécharge alors la CLI AWS si elle manque. Exclusif du kit : l'un ou l'autre, une seule fois.</em></div>
   {{else}}
   <div class="tile"><span>Paquet chiffré</span>
     <a class="button" href="{{$d.URL}}" hx-boost="false" download="{{$d.File}}">Télécharger {{$d.File}}</a>
@@ -22,9 +22,21 @@
   {{end}}
 </section>
 
-<h2>Sur le poste</h2>
+<h2>Sur le poste <span class="muted">· {{$d.Platform.Label}}</span></h2>
 <ol>
-{{if $d.Install}}
+{{if and $d.Install $d.Linux}}
+  <li>Copier le kit sur le poste et le décompresser (le mot de passe, lui, par un autre chemin), puis ouvrir un terminal dans son dossier.</li>
+  <li>Installer kura-agent (kit seulement ; avec le paquet seul, le .deb est déjà installé) :<br>
+    <code>sudo apt install ./kura-agent_*.deb</code></li>
+  <li>Installer le poste :<br>
+    <code>sudo kura-agent install --package {{$d.File}}</code><br>
+    <span class="hint">install demande le mot de passe, installe la CLI AWS si elle manque (signature PGP d'AWS vérifiée), crée le compte <code>kura-agent</code> (lecture seule), range les secrets dans le coffre (systemd-creds), vérifie l'accès au bucket, crée le minuteur <code>kura-sync.timer</code>, puis supprime le paquet.</span></li>
+{{else if $d.Linux}}
+  <li>Copier le fichier sur le poste (le mot de passe, lui, par un autre chemin).</li>
+  <li>Dans un terminal (kura-agent 0.7 ou plus récent) :<br>
+    <code>sudo kura-agent import /chemin/vers/{{$d.File}}</code><br>
+    <span class="hint">L'import essaie la clé auprès de Wasabi avant de remplacer l'ancienne (secret <code>{{$d.CredName}}</code>), puis supprime le fichier.</span></li>
+{{else if $d.Install}}
   <li>Copier le kit sur le poste et le décompresser (le mot de passe, lui, par un autre chemin).</li>
   <li>Dans une invite de commandes <strong>en tant qu'administrateur</strong>, depuis le dossier du kit :<br>
     <code>kura-agent.exe install --package {{$d.File}}</code><br>
@@ -35,7 +47,8 @@
     <code>kura-agent import C:\chemin\vers\{{$d.File}}</code><br>
     <span class="hint">L'import essaie la clé auprès de Wasabi avant de remplacer l'ancienne (secret <code>{{$d.CredName}}</code>), puis supprime le fichier.</span></li>
 {{end}}
-  <li>Attendre la sauvegarde suivante (ou « Sauvegarder maintenant » depuis l'icône) et vérifier qu'elle réussit.</li>
+  {{if $d.Linux}}<li>Lancer une sauvegarde (<code>sudo systemctl start --no-block kura-sync.service</code>, suivie par <code>journalctl -u kura-sync.service -f</code>) ou attendre la suivante, et vérifier qu'elle réussit.</li>
+  {{else}}<li>Attendre la sauvegarde suivante (ou « Sauvegarder maintenant » depuis l'icône) et vérifier qu'elle réussit.</li>{{end}}
   <li>Revenir sur la page du bucket et cliquer sur <strong>Confirmer l'installation</strong> : la console désactive alors les anciennes clés qu'elle a créées.</li>
 </ol>
 <p class="hint">Paquet perdu ou mot de passe oublié : désactiver cette clé sur la page du bucket et en créer une nouvelle.</p>

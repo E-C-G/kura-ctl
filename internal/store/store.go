@@ -132,6 +132,8 @@ var migrations = []string{
 		yaml       TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	);`,
+	// 5 : système du poste (kit d'installation et règles de sa configuration).
+	`ALTER TABLE buckets ADD COLUMN platform TEXT NOT NULL DEFAULT 'windows';`,
 }
 
 func (s *Store) migrate() error {
@@ -288,6 +290,59 @@ type Bucket struct {
 	AuditError     string
 	CollectedAt    time.Time // zéro : jamais collecté
 	CollectError   string    // erreur de la dernière collecte ("" : réussie)
+	Platform       Platform  // système du poste
+}
+
+// Platform : système et architecture du poste d'un bucket.
+type Platform string
+
+const (
+	PlatformWindows    Platform = "windows"
+	PlatformLinuxAMD64 Platform = "linux-amd64"
+	PlatformLinuxARM64 Platform = "linux-arm64"
+)
+
+// Platforms : systèmes pris en charge, dans l'ordre d'affichage.
+var Platforms = []Platform{PlatformWindows, PlatformLinuxAMD64, PlatformLinuxARM64}
+
+// Valid : système pris en charge par la console.
+func (p Platform) Valid() bool {
+	for _, q := range Platforms {
+		if p == q {
+			return true
+		}
+	}
+	return false
+}
+
+// OS : windows ou linux (GOOS de kura-agent).
+func (p Platform) OS() string {
+	goos, _, _ := strings.Cut(string(p), "-")
+	return goos
+}
+
+// Arch : amd64 ou arm64 (GOARCH de kura-agent).
+func (p Platform) Arch() string {
+	if _, arch, ok := strings.Cut(string(p), "-"); ok {
+		return arch
+	}
+	return "amd64"
+}
+
+// Linux : poste sous Linux (Ubuntu).
+func (p Platform) Linux() bool { return p.OS() == "linux" }
+
+// Label : nom affiché.
+func (p Platform) Label() string {
+	switch p {
+	case PlatformWindows:
+		return "Windows (64 bits)"
+	case PlatformLinuxAMD64:
+		return "Ubuntu 24.04 (amd64)"
+	case PlatformLinuxARM64:
+		return "Ubuntu 24.04 (arm64)"
+	}
+	return string(p)
 }
 
 // ErrNotFound : bucket inconnu de la console.
@@ -302,13 +357,13 @@ func (s *Store) ImportBucket(ctx context.Context, b Bucket) error {
 
 const bucketCols = `name, region, client_code, poste, imported_at, COALESCE(audited_at, ''),
 	COALESCE(settings_json, ''), COALESCE(deviations_json, ''), audit_error,
-	COALESCE(collected_at, ''), collect_error`
+	COALESCE(collected_at, ''), collect_error, platform`
 
 func scanBucket(sc interface{ Scan(...any) error }) (Bucket, error) {
 	var b Bucket
 	var imported, audited, collected string
 	err := sc.Scan(&b.Name, &b.Region, &b.ClientCode, &b.Poste, &imported, &audited, &b.SettingsJSON, &b.DeviationsJSON, &b.AuditError,
-		&collected, &b.CollectError)
+		&collected, &b.CollectError, &b.Platform)
 	b.ImportedAt, b.AuditedAt, b.CollectedAt = parseTS(imported), parseTS(audited), parseTS(collected)
 	return b, err
 }
@@ -567,9 +622,27 @@ func (s *Store) PosteConfig(ctx context.Context, bucket string) (PosteConfig, er
 	return c, err
 }
 
-// SavePosteConfig enregistre (ou remplace) la configuration du poste d'un bucket.
-func (s *Store) SavePosteConfig(ctx context.Context, bucket, yaml string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO poste_configs (bucket, yaml, updated_at) VALUES (?, ?, ?)
-		ON CONFLICT(bucket) DO UPDATE SET yaml = excluded.yaml, updated_at = excluded.updated_at`, bucket, yaml, ts(s.now()))
-	return err
+// SavePosteConfig enregistre (ou remplace) la configuration du poste d'un bucket, et
+// le système du poste pour lequel elle a été vérifiée.
+func (s *Store) SavePosteConfig(ctx context.Context, bucket string, platform Platform, yaml string) error {
+	if !platform.Valid() {
+		return fmt.Errorf("système du poste inconnu : %q", platform)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE buckets SET platform = ? WHERE name = ?`, string(platform), bucket)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO poste_configs (bucket, yaml, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(bucket) DO UPDATE SET yaml = excluded.yaml, updated_at = excluded.updated_at`, bucket, yaml, ts(s.now())); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

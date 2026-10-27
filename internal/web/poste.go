@@ -20,7 +20,23 @@ import (
 type KitSource interface {
 	// Prepare renvoie les composants ; release, appelé une fois le kit écrit, libère
 	// les fichiers du cache.
-	Prepare(ctx context.Context) (c kit.Components, release func(), err error)
+	Prepare(ctx context.Context, t kit.Target) (c kit.Components, release func(), err error)
+}
+
+// kitTarget : cible du kit pour le système du poste.
+func kitTarget(p store.Platform) kit.Target {
+	if p == "" {
+		return kit.Windows
+	}
+	return kit.Target{OS: p.OS(), Arch: p.Arch()}
+}
+
+// runNowHint : comment lancer une sauvegarde tout de suite sur le poste.
+func runNowHint(p store.Platform) string {
+	if p.Linux() {
+		return "sudo systemctl start --no-block kura-sync.service"
+	}
+	return "icône Kura → Sauvegarder maintenant"
 }
 
 // posteView : état de la configuration du poste, sur la page du bucket.
@@ -53,6 +69,9 @@ type posteEdit struct {
 	UpdatedAt time.Time
 	Err       string
 	Checked   poste.Checked
+	Platform  store.Platform   // système choisi dans le formulaire
+	Platforms []store.Platform // choix possibles
+	Template  bool             // modèle de départ affiché à la place de la configuration enregistrée
 }
 
 func (s *Server) postePage(w http.ResponseWriter, r *http.Request) {
@@ -62,19 +81,29 @@ func (s *Server) postePage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d := posteEdit{Bucket: b}
+	d := posteEdit{Bucket: b, Platform: platformOr(b), Platforms: store.Platforms}
+	// ?systeme=… : modèle de départ pour ce système (rien n'est enregistré).
+	if q := store.Platform(r.URL.Query().Get("systeme")); q.Valid() {
+		d.Platform, d.Template = q, true
+	}
 	pc, err := s.Store.PosteConfig(ctx, b.Name)
 	switch {
 	case err == nil:
-		d.YAML, d.Saved, d.UpdatedAt = pc.YAML, true, pc.UpdatedAt
-		if d.Checked, err = poste.Check(pc.YAML, b); err != nil {
-			d.Err = err.Error()
+		d.Saved, d.UpdatedAt = true, pc.UpdatedAt
+		if !d.Template {
+			d.YAML = pc.YAML
+			if d.Checked, err = poste.Check(pc.YAML, b); err != nil {
+				d.Err = err.Error()
+			}
 		}
 	case errors.Is(err, store.ErrNotFound):
-		d.YAML = poste.Template(b)
+		d.Template = true
 	default:
 		s.fail(w, r, err)
 		return
+	}
+	if d.Template {
+		d.YAML = poste.TemplateFor(b, d.Platform)
 	}
 	s.render(w, r, "poste", view{Title: "Configuration du poste · " + b.Name, Nav: "buckets", Data: d})
 }
@@ -87,22 +116,26 @@ func (s *Server) posteSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := strings.ReplaceAll(r.PostFormValue("yaml"), "\r\n", "\n")
-	d := posteEdit{Bucket: b, YAML: text}
+	platform := store.Platform(r.PostFormValue("platform"))
+	if platform == "" {
+		platform = platformOr(b)
+	}
+	d := posteEdit{Bucket: b, YAML: text, Platform: platform, Platforms: store.Platforms}
 	if old, err := s.Store.PosteConfig(ctx, b.Name); err == nil {
 		d.Saved, d.UpdatedAt = true, old.UpdatedAt
 	}
-	if d.Checked, err = poste.Check(text, b); err != nil {
+	if d.Checked, err = poste.CheckFor(text, b, platform); err != nil {
 		// Rien n'est enregistré : la page réaffiche le texte saisi avec l'erreur (en
 		// 200 : htmx n'affiche pas une réponse 4xx).
 		d.Err = err.Error()
 		s.render(w, r, "poste", view{Title: "Configuration du poste · " + b.Name, Nav: "buckets", Data: d})
 		return
 	}
-	if err := s.Store.SavePosteConfig(ctx, b.Name, text); err != nil {
+	if err := s.Store.SavePosteConfig(ctx, b.Name, platform, text); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	detail := fmt.Sprintf("%d job(s), secret de la clé %s", len(d.Checked.Config.Jobs), d.Checked.KeyName)
+	detail := fmt.Sprintf("%s, %d job(s), secret de la clé %s", platform.Label(), len(d.Checked.Config.Jobs), d.Checked.KeyName)
 	if n := len(d.Checked.Secrets); n > 0 {
 		names := make([]string, n)
 		for i, sec := range d.Checked.Secrets {
@@ -118,28 +151,62 @@ func (s *Server) posteSubmit(w http.ResponseWriter, r *http.Request) {
 // kitReadme : LISEZMOI.txt du kit.
 func kitReadme(b store.Bucket, p *pendingPack, c kit.Components, now time.Time) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Kit d'installation Kura : poste %s, bucket %s (client %s)\n", orDash(b.Poste), b.Name, b.ClientCode)
+	fmt.Fprintf(&sb, "Kit d'installation Kura : poste %s, bucket %s (client %s), %s\n", orDash(b.Poste), b.Name, b.ClientCode, platformOr(store.Bucket{Platform: p.platform}).Label())
 	fmt.Fprintf(&sb, "Préparé par kura-ctl le %s. Paquet ouvrable jusqu'au %s.\n\n", dateTimeFR(now), dateTimeFR(p.validUntil))
 	sb.WriteString("Contenu\n")
-	fmt.Fprintf(&sb, "  kura-agent.exe, kura-agentw.exe  kura-agent %s\n", c.AgentVersion)
-	fmt.Fprintf(&sb, "                                   SHA-256 de kura-agent.exe : %s\n", c.AgentSHA256)
-	fmt.Fprintf(&sb, "  %s                     CLI AWS v2, installée seulement si elle manque\n", kit.MSIName)
-	fmt.Fprintf(&sb, "                                   SHA-256 : %s\n", c.MSISHA256)
-	fmt.Fprintf(&sb, "  %-33s configuration du poste et secrets, chiffrés\n\n", p.file)
-	sb.WriteString("Installation\n")
-	sb.WriteString("  1. Décompresser ce dossier sur le poste.\n")
-	sb.WriteString("  2. Ouvrir une invite de commandes « Exécuter en tant qu'administrateur », puis :\n")
-	fmt.Fprintf(&sb, "       cd <dossier du kit>\n       kura-agent.exe install --package %s\n", p.file)
-	sb.WriteString("  3. Saisir le mot de passe du paquet, affiché une seule fois par la console\n")
-	sb.WriteString("     (il ne voyage jamais avec ce kit).\n")
-	sb.WriteString("     install vérifie la signature Amazon du MSI avant d'installer la CLI AWS,\n")
-	sb.WriteString("     range les secrets dans le coffre, vérifie l'accès au bucket, crée la tâche\n")
-	sb.WriteString("     planifiée et supprime le paquet.\n")
-	sb.WriteString("  4. Lancer une sauvegarde (icône Kura > Sauvegarder maintenant, ou\n")
-	sb.WriteString("     schtasks /Run /TN \\Kura\\Sync), vérifier qu'elle réussit, puis confirmer\n")
-	sb.WriteString("     l'installation de la clé sur la page du bucket dans la console.\n\n")
+	row := func(name, text string) { fmt.Fprintf(&sb, "  %-38s %s\n", name, text) }
+	if c.Target.Linux() {
+		row(c.AgentFile, "kura-agent "+c.AgentVersion+" (paquet Debian/Ubuntu)")
+		row("", "SHA-256 : "+c.AgentSHA256)
+		row(c.AWSFile+" (+ .sig)", "CLI AWS v2, installée seulement si elle manque")
+		row("", "SHA-256 : "+c.AWSSHA256)
+		row(p.file, "configuration du poste et secrets, chiffrés")
+		sb.WriteString("\nInstallation\n")
+		sb.WriteString("  1. Décompresser ce dossier sur le poste et ouvrir un terminal dedans.\n")
+		sb.WriteString("  2. Installer kura-agent :\n")
+		fmt.Fprintf(&sb, "       sudo apt install ./%s\n", c.AgentFile)
+		sb.WriteString("  3. Installer le poste :\n")
+		fmt.Fprintf(&sb, "       sudo kura-agent install --package %s\n", p.file)
+		sb.WriteString("     Saisir le mot de passe du paquet, affiché une seule fois par la console\n")
+		sb.WriteString("     (il ne voyage jamais avec ce kit).\n")
+		sb.WriteString("     install vérifie la signature PGP d'AWS avant d'installer la CLI AWS, crée le\n")
+		sb.WriteString("     compte kura-agent (lecture seule), range les secrets dans le coffre\n")
+		sb.WriteString("     (systemd-creds), vérifie l'accès au bucket, crée le minuteur kura-sync.timer\n")
+		sb.WriteString("     et supprime le paquet.\n")
+		sb.WriteString("  4. Lancer une sauvegarde :\n")
+		sb.WriteString("       sudo systemctl start --no-block kura-sync.service\n")
+		sb.WriteString("     la suivre (journalctl -u kura-sync.service -f, ou kura-agent status), vérifier\n")
+		sb.WriteString("     qu'elle réussit, puis confirmer l'installation de la clé sur la page du bucket\n")
+		sb.WriteString("     dans la console.\n\n")
+	} else {
+		row("kura-agent.exe, kura-agentw.exe", "kura-agent "+c.AgentVersion)
+		row("", "SHA-256 de kura-agent.exe : "+c.AgentSHA256)
+		row(c.AWSFile, "CLI AWS v2, installée seulement si elle manque")
+		row("", "SHA-256 : "+c.AWSSHA256)
+		row(p.file, "configuration du poste et secrets, chiffrés")
+		sb.WriteString("\nInstallation\n")
+		sb.WriteString("  1. Décompresser ce dossier sur le poste.\n")
+		sb.WriteString("  2. Ouvrir une invite de commandes « Exécuter en tant qu'administrateur », puis :\n")
+		fmt.Fprintf(&sb, "       cd <dossier du kit>\n       kura-agent.exe install --package %s\n", p.file)
+		sb.WriteString("  3. Saisir le mot de passe du paquet, affiché une seule fois par la console\n")
+		sb.WriteString("     (il ne voyage jamais avec ce kit).\n")
+		sb.WriteString("     install vérifie la signature Amazon du MSI avant d'installer la CLI AWS,\n")
+		sb.WriteString("     range les secrets dans le coffre, vérifie l'accès au bucket, crée la tâche\n")
+		sb.WriteString("     planifiée et supprime le paquet.\n")
+		sb.WriteString("  4. Lancer une sauvegarde (icône Kura > Sauvegarder maintenant, ou\n")
+		sb.WriteString("     schtasks /Run /TN \\Kura\\Sync), vérifier qu'elle réussit, puis confirmer\n")
+		sb.WriteString("     l'installation de la clé sur la page du bucket dans la console.\n\n")
+	}
 	sb.WriteString("Après l'installation, supprimer ce dossier : le paquet contenait la clé du poste.\n")
 	return sb.String()
+}
+
+// platformOr : système du poste, Windows si inconnu.
+func platformOr(b store.Bucket) store.Platform {
+	if b.Platform.Valid() {
+		return b.Platform
+	}
+	return store.PlatformWindows
 }
 
 func orDash(s string) string {
@@ -188,7 +255,7 @@ func (s *Server) downloadKit(w http.ResponseWriter, r *http.Request) {
 	}
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
-	c, done, err := s.Kit.Prepare(pctx)
+	c, done, err := s.Kit.Prepare(pctx, kitTarget(p.platform))
 	if err != nil {
 		// Le paquet n'est pas consommé : le .kura seul reste téléchargeable.
 		release(false)
@@ -216,7 +283,7 @@ func (s *Server) downloadKit(w http.ResponseWriter, r *http.Request) {
 		_ = s.Store.Audit(ctx, "paquet téléchargé", p.bucket, store.ResultError, "clé "+maskKey(p.keyID)+", état non enregistré : "+err.Error())
 	}
 	_ = s.Store.Audit(ctx, "kit d'installation téléchargé", p.bucket, store.ResultOK,
-		fmt.Sprintf("clé %s, kura-agent %s, CLI AWS %s", maskKey(p.keyID), c.AgentVersion, short(c.MSISHA256)))
+		fmt.Sprintf("clé %s, %s, kura-agent %s, CLI AWS %s", maskKey(p.keyID), c.Target, c.AgentVersion, short(c.AWSSHA256)))
 }
 
 func short(h string) string {

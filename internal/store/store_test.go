@@ -150,16 +150,48 @@ func TestPosteConfig(t *testing.T) {
 	if _, err := st.PosteConfig(ctx, "acme-srv01"); err != ErrNotFound {
 		t.Fatalf("aucune configuration : %v", err)
 	}
-	for _, y := range []string{"version: 1\n", "version: 1\n# v2\n"} {
-		if err := st.SavePosteConfig(ctx, "acme-srv01", y); err != nil {
+	if b, _ := st.Bucket(ctx, "acme-srv01"); b.Platform != PlatformWindows {
+		t.Fatalf("système par défaut : %q", b.Platform)
+	}
+	for _, c := range []struct {
+		yaml string
+		p    Platform
+	}{{"version: 1\n", PlatformWindows}, {"version: 1\n# v2\n", PlatformLinuxARM64}} {
+		if err := st.SavePosteConfig(ctx, "acme-srv01", c.p, c.yaml); err != nil {
 			t.Fatal(err)
 		}
-		c, err := st.PosteConfig(ctx, "acme-srv01")
-		if err != nil || c.YAML != y || c.UpdatedAt.IsZero() {
-			t.Fatalf("%+v %v", c, err)
+		pc, err := st.PosteConfig(ctx, "acme-srv01")
+		if err != nil || pc.YAML != c.yaml || pc.UpdatedAt.IsZero() {
+			t.Fatalf("%+v %v", pc, err)
+		}
+		if b, _ := st.Bucket(ctx, "acme-srv01"); b.Platform != c.p {
+			t.Fatalf("système %q, attendu %q", b.Platform, c.p)
 		}
 	}
-	if err := st.SavePosteConfig(ctx, "inconnu", "version: 1\n"); err == nil {
+	if err := st.SavePosteConfig(ctx, "inconnu", PlatformWindows, "version: 1\n"); err == nil {
 		t.Fatal("configuration d'un bucket inconnu acceptée")
+	}
+	if err := st.SavePosteConfig(ctx, "acme-srv01", "macos", "version: 1\n"); err == nil {
+		t.Fatal("système inconnu accepté")
+	}
+	if pc, _ := st.PosteConfig(ctx, "acme-srv01"); pc.YAML != "version: 1\n# v2\n" {
+		t.Fatalf("configuration remplacée malgré le refus : %q", pc.YAML)
+	}
+}
+
+func TestPlatform(t *testing.T) {
+	for _, c := range []struct {
+		p            Platform
+		goos, arch   string
+		linux, valid bool
+	}{
+		{PlatformWindows, "windows", "amd64", false, true},
+		{PlatformLinuxAMD64, "linux", "amd64", true, true},
+		{PlatformLinuxARM64, "linux", "arm64", true, true},
+		{"darwin-arm64", "darwin", "arm64", false, false},
+	} {
+		if c.p.OS() != c.goos || c.p.Arch() != c.arch || c.p.Linux() != c.linux || c.p.Valid() != c.valid || c.p.Label() == "" {
+			t.Errorf("%q : %s %s %v %v", c.p, c.p.OS(), c.p.Arch(), c.p.Linux(), c.p.Valid())
+		}
 	}
 }

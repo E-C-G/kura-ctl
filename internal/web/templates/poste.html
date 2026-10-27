@@ -2,10 +2,12 @@
 <p><a href="/buckets/{{$d.Bucket.Name}}">← {{$d.Bucket.Name}}</a></p>
 <h1>Configuration du poste <span class="muted">· {{$d.Bucket.Name}}</span></h1>
 <p class="hint">Le <code>config.yaml</code> de kura-agent pour ce poste, vérifié avec le code même de l'agent. Il part dans le
-  paquet d'installation complète ; {{if $d.Saved}}enregistré le {{datetime $d.UpdatedAt}}{{else}}pas encore enregistré : modèle de départ ci-dessous, à adapter (sources, horaire, comptes){{end}}.</p>
+  paquet d'installation complète ; {{if $d.Saved}}enregistré le {{datetime $d.UpdatedAt}} pour {{$d.Bucket.Platform.Label}}{{else}}pas encore enregistré{{end}}{{if $d.Template}} : modèle de départ ci-dessous pour {{$d.Platform.Label}}, à adapter (sources, horaire, comptes){{if $d.Saved}}, il ne remplace la configuration enregistrée qu'une fois vérifié et enregistré{{end}}{{end}}.</p>
+<p class="hint">Modèle de départ : {{range $i, $p := $d.Platforms}}{{if $i}} · {{end}}<a href="/buckets/{{$d.Bucket.Name}}/poste?systeme={{$p}}">{{$p.Label}}</a>{{end}}</p>
 {{with $d.Err}}<pre class="flash error doc">{{.}}</pre>{{end}}
 <form method="post" action="/buckets/{{$d.Bucket.Name}}/poste" autocomplete="off">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Système du poste<select name="platform">{{range $d.Platforms}}<option value="{{.}}"{{if eq . $d.Platform}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
   <label>config.yaml<textarea name="yaml" class="yaml" spellcheck="false" required>{{$d.YAML}}</textarea></label>
   <button>Vérifier et enregistrer</button>
 </form>
@@ -14,7 +16,9 @@
   <li><code>profile.bucket</code>, <code>endpoint</code> et <code>region</code> : ceux de ce bucket.</li>
   <li><code>profile.aws_credentials: credential:&lt;nom&gt;</code> : la clé du poste, créée par la console avec le paquet.</li>
   <li>Aucun secret en clair : URL de ping et jetons en <code>credential:&lt;nom&gt;</code>, valeurs saisies à la création du paquet (jamais conservées par la console).</li>
-  <li><code>profile.aws_cli</code> vide (ou <code>C:/Program Files/Amazon/AWSCLIV2/aws.exe</code>) : la CLI AWS est installée par <code>kura-agent install</code> si elle manque.</li>
+  <li><code>profile.aws_cli</code> vide (ou <code>C:/Program Files/Amazon/AWSCLIV2/aws.exe</code>, <code>/usr/local/bin/aws</code> sous Linux) : la CLI AWS est installée par <code>kura-agent install</code> si elle manque.</li>
+  <li>Sources : chemins complets du système du poste (<code>D:/Donnees</code>, <code>${PROFILE:alice}/Documents</code> ; <code>/home/alice/Documents</code> sous Linux).</li>
+  <li>Sous Linux : ni <code>pre_tasks</code>, ni <code>post_tasks</code>, ni <code>tray</code> (pas d'icône) ; la CLI AWS en snap n'est pas utilisable par le service.</li>
   <li>Le texte est conservé tel que saisi, commentaires compris : n'y écrire aucun secret, même en commentaire. Un seul document YAML (rien après <code>---</code>).</li>
   <li>Les sources et les comptes (<code>${PROFILE:…}</code>, <code>tray</code>) sont vérifiés sur le poste, à l'installation.</li>
 </ul>
