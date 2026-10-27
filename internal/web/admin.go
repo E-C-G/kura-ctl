@@ -667,15 +667,19 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 			done("Cette clé n'est pas en attente de confirmation.")
 			return
 		}
-		// Preuve que le poste s'en sert : Wasabi a vu la clé travailler. Sans elle,
-		// désactiver les autres clés arrêterait la sauvegarde.
+		// Preuve que le poste s'en sert : Wasabi a vu la clé travailler, ou l'opérateur
+		// a vérifié sur le poste qu'une sauvegarde a réussi (Wasabi met à jour la date
+		// de dernière utilisation avec retard). Sans elle, désactiver les autres clés
+		// arrêterait la sauvegarde.
 		lastUsed, err := o.account.AccessKeyLastUsed(wctx, k.ID)
+		verified := r.PostFormValue("verifie") == "on"
 		switch {
-		case err != nil && r.PostFormValue("verifie") != "on":
+		case err != nil && !verified:
 			done("Wasabi ne dit pas si la clé a servi (" + err.Error() + ") : vérifier sur le poste qu'une sauvegarde a réussi avec elle, puis cocher « vérifié sur le poste » et confirmer.")
 			return
-		case err == nil && lastUsed.IsZero():
-			done("Cette clé n'a encore jamais servi : lancer une sauvegarde sur le poste (" + runNowHint(b.Platform) + "), puis confirmer. Rien n'a été désactivé.")
+		case err == nil && lastUsed.IsZero() && !verified:
+			done("Wasabi n'indique pas encore que cette clé a servi (il met à jour cette date avec retard). Si une sauvegarde a réussi sur le poste avec elle (" +
+				runNowHint(b.Platform) + " pour en lancer une), cocher « vérifié sur le poste » et confirmer ; sinon, réessayer plus tard. Rien n'a été désactivé.")
 			return
 		}
 		if err := s.Store.SetKeyStatus(ctx, k.ID, store.KeyInstalled); err != nil {
@@ -683,8 +687,11 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		proof := "utilisée chez Wasabi le " + dateTimeFR(lastUsed)
-		if lastUsed.IsZero() {
+		switch {
+		case err != nil:
 			proof = "sauvegarde vérifiée sur le poste (utilisation non disponible chez Wasabi)"
+		case lastUsed.IsZero():
+			proof = "sauvegarde vérifiée sur le poste (Wasabi n'indiquait pas encore d'utilisation)"
 		}
 		audit("installation de la clé confirmée", store.ResultOK, " : "+proof)
 		// Les clés créées avant elle sont désactivées ; jamais une clé plus récente

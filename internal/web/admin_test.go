@@ -200,9 +200,12 @@ func TestPosteKeyLifecycle(t *testing.T) {
 	// Sans le nom du bucket : rien.
 	hn.do("POST", "/buckets/acme-srv01/cles/AKIDPOSTE0002/installee", url.Values{"csrf": {tok}}, nil)
 	// Clé qui n'a jamais servi : rien n'est désactivé.
-	inst("AKIDPOSTE0002")
+	rec = inst("AKIDPOSTE0002")
 	if k, _ := hn.st.Key(ctx, "AKIDPOSTE0002"); k.Status != store.KeyIssued {
 		t.Fatalf("installation confirmée sans preuve : %+v", k)
+	}
+	if body := hn.do("GET", "/buckets/acme-srv01", nil, nil).Body.String(); rec.Code != http.StatusSeeOther || !strings.Contains(body, "vérifié sur le poste") {
+		t.Fatalf("message sans la case à cocher :\n%s", body)
 	}
 	acc.used["AKIDPOSTE0002"] = time.Now()
 	// Confirmer la plus ancienne (jamais servie) ne désactive jamais la plus récente.
@@ -261,6 +264,21 @@ func TestAdminKeyChange(t *testing.T) {
 
 // Wasabi ne dit pas si la clé a servi : confirmation possible seulement en cochant
 // « vérifié sur le poste ».
+// Wasabi n'indique pas encore d'utilisation (date mise à jour avec retard) : la case
+// « vérifié sur le poste » suffit.
+func TestInstallConfirmVerifiedBeforeWasabi(t *testing.T) {
+	hn, tok := adminHarness(t, nil)
+	hn.createKey(tok)
+	f := url.Values{"csrf": {tok}, "confirm": {"acme-srv01"}, "verifie": {"on"}}
+	hn.do("POST", "/buckets/acme-srv01/cles/AKIDPOSTE0001/installee", f, nil)
+	if k, _ := hn.st.Key(context.Background(), "AKIDPOSTE0001"); k.Status != store.KeyInstalled {
+		t.Fatalf("confirmation vérifiée refusée : %+v", k)
+	}
+	if !strings.Contains(hn.do("GET", "/audit", nil, nil).Body.String(), "pas encore d&#39;utilisation") {
+		t.Fatal("audit sans la nature de la preuve")
+	}
+}
+
 func TestInstallConfirmWithoutLastUsed(t *testing.T) {
 	hn, tok := adminHarness(t, func(a *fakeAccount) { a.usedErr = errors.New("NotImplemented") })
 	hn.createKey(tok)
