@@ -10,6 +10,21 @@
   {{else}}<p class="muted">Aucun bucket importé pour l'instant.</p>{{end}}
 </section>
 <section>
+  <h2>Créer un bucket</h2>
+  {{if $d.CanCreate}}
+  <p class="hint">Un bucket neuf au modèle « sauvegarde standard » : <strong>Object Lock</strong> et versioning à la création (Object Lock ne pourra plus être retiré), rétention par défaut, cycle de vie, utilisateur du poste (sans clé) et stratégie de bucket ; les réglages sont relus, puis le bucket est suivi par la console.</p>
+  <form method="post" action="/buckets/creer" class="create" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="once" value="{{$d.Once}}">
+    <label>Client (code)<input name="client_code" required pattern="[a-z0-9][a-z0-9\-]{0,19}" list="clients" placeholder="acme"></label>
+    <label>Nom du client<input name="client_name" placeholder="Acme (premier bucket du client)"></label>
+    <label>Poste<input name="poste" required placeholder="portable01"></label>
+    <label>Région<select name="region">{{range $d.Regions}}<option value="{{.Code}}">{{.Code}} · {{.Place}}</option>{{end}}</select></label>
+    <label>Nom du bucket<input name="bucket" pattern="[a-z0-9][a-z0-9.\-]{1,57}[a-z0-9]" placeholder="vide : kura-&lt;client&gt;-&lt;poste&gt;"></label>
+    <button>Créer le bucket</button>
+  </form>
+  {{else}}<p class="hint">Création indisponible : {{or $d.CreateBlocked "console verrouillée"}}.</p>{{end}}
+</section>
+<section>
   <h2>Dans le compte Wasabi, pas encore suivis</h2>
   {{with $d.ListError}}<p class="flash error">Liste des buckets impossible : {{.}}</p>{{end}}
   <p class="hint">Importer un bucket ne modifie rien chez Wasabi : la console relève ses réglages et collecte son usage (un an d'historique).</p>
@@ -29,7 +44,7 @@
       </td></tr>
     {{end}}</tbody>
   </table>
-  <datalist id="clients">{{range $d.Clients}}<option value="{{.Code}}">{{.Name}}</option>{{end}}</datalist>
   {{else if not $d.ListError}}<p class="muted">Tous les buckets du compte sont suivis.</p>{{end}}
 </section>
+<datalist id="clients">{{range $d.Clients}}<option value="{{.Code}}">{{.Name}}</option>{{end}}</datalist>
 {{end}}

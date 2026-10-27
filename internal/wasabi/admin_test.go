@@ -313,7 +313,13 @@ func TestPosteAndAdminPolicies(t *testing.T) {
 	if !strings.Contains(a, `"arn:aws:iam::*:user/kura-ctl*"`) {
 		t.Error("la console peut agir sur son propre utilisateur")
 	}
-	for _, forbidden := range []string{"CreateBucket", "PutBucketVersioning", "Tagging", "ListUsers"} {
+	// Lot 4 : création de bucket (avec Object Lock et versioning), jamais suppression.
+	for _, needed := range []string{`"s3:CreateBucket"`, `"s3:PutBucketVersioning"`} {
+		if !strings.Contains(a, needed) {
+			t.Errorf("droit de création manquant : %s", needed)
+		}
+	}
+	for _, forbidden := range []string{"DeleteBucket", "Tagging", "ListUsers"} {
 		if strings.Contains(a, forbidden) {
 			t.Errorf("droit inutilisé dans la stratégie de la console : %s", forbidden)
 		}

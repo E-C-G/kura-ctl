@@ -296,6 +296,11 @@ type bucketsData struct {
 	Clients    []store.Client
 	ListError  string
 	SuggestFor map[string]string
+	// Création d'un bucket (lot 4).
+	CanCreate     bool
+	CreateBlocked string // pourquoi la création est indisponible
+	Regions       []wasabi.Region
+	Once          string
 }
 
 func (s *Server) bucketsPage(w http.ResponseWriter, r *http.Request) {
@@ -305,9 +310,14 @@ func (s *Server) bucketsPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	d := bucketsData{Imported: ov.Buckets, SuggestFor: map[string]string{}}
+	d := bucketsData{Imported: ov.Buckets, SuggestFor: map[string]string{}, Regions: wasabi.Regions}
 	d.Clients, _ = s.Store.Clients(ctx)
 	if o := s.current(); o != nil {
+		adm := s.adminState(ctx, o)
+		d.CanCreate, d.CreateBlocked = adm.OK, adm.Reason
+		if adm.OK {
+			d.Once = o.newOnce()
+		}
 		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		all, err := o.account.ListBuckets(lctx)
 		cancel()
