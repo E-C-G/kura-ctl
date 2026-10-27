@@ -6,13 +6,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // fakeS3 répond comme Wasabi en adressage par chemin : /<bucket>?<sous-ressource>.
+// Les réglages d'un bucket sont lus en parallèle : auth est protégé par mu.
 type fakeS3 struct {
 	buckets map[string]fakeBucket
+	mu      sync.Mutex
 	auth    []string
 }
 
@@ -27,7 +30,9 @@ func s3err(w http.ResponseWriter, status int, code string) {
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
 	f.auth = append(f.auth, r.Header.Get("Authorization"))
+	f.mu.Unlock()
 	name := strings.Trim(r.URL.Path, "/")
 	w.Header().Set("Content-Type", "application/xml")
 	if name == "" {
@@ -142,6 +147,8 @@ func TestReadSettingsAndAudit(t *testing.T) {
 	if d := Standard.Audit(s); len(d) != 0 {
 		t.Fatalf("un bucket conforme ne doit avoir aucun écart : %+v", d)
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, a := range f.auth {
 		if !strings.HasPrefix(a, "AWS4-HMAC-SHA256 Credential=AKIDTEST/") || strings.Contains(a, "SECRETTEST") {
 			t.Fatalf("en-tête de signature inattendu : %q", a)
