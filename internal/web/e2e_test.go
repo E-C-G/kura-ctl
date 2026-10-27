@@ -32,6 +32,9 @@ func TestServeForBrowser(t *testing.T) {
 		NewAccount: func(k wasabi.Keys) Wasabi { return newFakeAccount(k) },
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Kit:        &fakeKit{t: t, dir: t.TempDir()},
+		// Horloge en avance sur le délai de grâce : une clé désactivée peut être
+		// supprimée tout de suite (deux clés au plus chez Wasabi).
+		Now: func() time.Time { return time.Now().Add(KeyGrace + time.Hour) },
 	}
 	ln, err := srv.Listen("0")
 	if err != nil {

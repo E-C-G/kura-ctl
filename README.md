@@ -9,7 +9,7 @@ puis corrige ces réglages, crée la clé limitée de chaque poste et prépare s
 | --- | --- | --- |
 | 1 « Observer » | usage, coûts, audit des réglages, journal ; aucune écriture chez Wasabi | **fait** |
 | 2 « Sécuriser l'existant » | clé `kura-ctl-admin`, stratégie de bucket, cycle de vie, rétention, clé de poste et paquet `.kura` | **fait** |
-| 3 « Préparer les postes » | configuration du poste, paquet d'installation complète, kit zip (kura-agent, CLI AWS), rotation guidée | **fait** |
+| 3 « Préparer les postes » | configuration du poste, paquet d'installation complète, kit zip (kura-agent, CLI AWS) pour Windows et Ubuntu, rotation guidée | **fait** |
 | 4 « Créer proprement » | bucket neuf depuis le modèle, avec Object Lock | à faire |
 
 Toute écriture chez Wasabi passe par un aperçu de ce qui sera écrit, la saisie du nom du
@@ -365,16 +365,23 @@ contre la console elle-même, au prix de ne jamais pouvoir effacer avant échéa
 
 **Configuration du poste.** Sur la page du bucket, *Préparer la configuration du poste* ouvre le
 `config.yaml` de kura-agent pour ce poste, prérempli à partir du bucket (bucket, endpoint,
-région, `aws_credentials: credential:wasabi`, une sauvegarde quotidienne à adapter). *Vérifier et
-enregistrer* le contrôle avec le code même de l'agent (`pkg/config`), plus les règles de la
-console :
+région, `aws_credentials: credential:wasabi`, une sauvegarde quotidienne à adapter). Le
+**système du poste** se choisit dans le même formulaire : Windows (64 bits), Ubuntu 24.04
+(amd64) ou Ubuntu 24.04 (arm64) ; un lien par système recharge le modèle de départ adapté
+(sources `D:/…` ou `/home/…`). *Vérifier et enregistrer* le contrôle avec le code même de
+l'agent (`pkg/config`), plus les règles de la console :
 
 - `profile.bucket`, `endpoint` et `region` sont ceux du bucket ;
 - la clé du poste passe par `profile.aws_credentials: credential:<nom>` ;
 - **aucun secret en clair** (la base de la console n'est pas chiffrée) : URL de ping et jeton
   du bilan en `credential:<nom>`, l'ancienne forme `notify.webhook` est refusée ;
-- `profile.aws_cli` vide (ou l'emplacement du MSI) : la CLI AWS est installée par l'agent ;
-- les sources et les comptes (`${PROFILE:…}`, `tray`) ne sont vérifiés que sur le poste.
+- `profile.aws_cli` vide (ou l'emplacement du MSI, `/usr/local/bin/aws` sous Linux) : la CLI
+  AWS est installée par l'agent ; sous Linux, la CLI en snap est refusée (inutilisable par le
+  service) ;
+- sources en chemins complets du système du poste (`D:/Donnees`, `${PROFILE:alice}/Documents`,
+  `\\nas\partage` ; `/home/alice/Documents` sous Linux, où `${PROFILE:alice}` vaut `/home/alice`) ;
+- sous Linux, ni `pre_tasks`, ni `post_tasks`, ni `tray` (pas d'icône) ;
+- l'existence des sources et des comptes n'est vérifiée que sur le poste.
 
 Le texte est conservé tel que saisi (commentaires compris), revérifié à chaque affichage et à
 chaque création de paquet.
@@ -387,35 +394,46 @@ le paquet « clé seule ». Mot de passe affiché une fois, téléchargement uni
 30 minutes, ouvrable 72 heures.
 
 **Kit zip.** Le paquet se télécharge seul ou dans un kit `kura-<bucket>-<date>.zip` (l'un ou
-l'autre, une seule fois) :
+l'autre, une seule fois), préparé pour le système du poste au moment de la création du paquet :
 
-| Fichier | Origine |
-|---|---|
-| `kura-agent.exe`, `kura-agentw.exe` | dernière release de kura-agent (0.6.0 au moins), zip vérifié avec son `SHA256SUMS` |
-| `AWSCLIV2.msi` | `https://awscli.amazonaws.com/AWSCLIV2.msi`, retéléchargé au-delà de 30 jours |
-| `<bucket>-<date>.kura` | le paquet chiffré |
-| `LISEZMOI.txt` | contenu, sommes SHA-256, étapes sur le poste |
+| Système | Fichier | Origine |
+|---|---|---|
+| Windows | `kura-agent.exe`, `kura-agentw.exe` | dernière release de kura-agent (0.6.0 au moins), zip vérifié avec son `SHA256SUMS` |
+| Windows | `AWSCLIV2.msi` | `https://awscli.amazonaws.com/AWSCLIV2.msi` |
+| Ubuntu | `kura-agent_<version>_<arch>.deb` | dernière release de kura-agent (0.7.0 au moins), vérifié avec son `SHA256SUMS` |
+| Ubuntu | `awscli-exe-linux-<x86_64\|aarch64>.zip` et `.sig` | `https://awscli.amazonaws.com/`, la signature PGP avec le zip |
+| tous | `<bucket>-<date>.kura` | le paquet chiffré |
+| tous | `LISEZMOI.txt` | contenu, sommes SHA-256, étapes sur le poste |
 
-Les composants sont gardés en cache dans `<données>/kit`. Si GitHub ou AWS est injoignable, le
-kit échoue sans consommer le paquet, qui reste téléchargeable seul (le poste téléchargera alors
-la CLI AWS) ; un MSI déjà en cache sert encore. La signature Authenticode du MSI (Amazon) est
-vérifiée par kura-agent sur le poste, avant installation.
+Les composants sont gardés en cache dans `<données>/kit` ; la CLI AWS est retéléchargée au-delà
+de 30 jours. Si GitHub ou AWS est injoignable, le kit échoue sans consommer le paquet, qui
+reste téléchargeable seul (le poste téléchargera alors la CLI AWS) ; une CLI AWS déjà en cache
+sert encore. La signature de la CLI AWS (Authenticode Amazon du MSI, PGP « AWS CLI Team » du
+zip Linux) est vérifiée par kura-agent sur le poste, avant installation.
 
 **Limite.** Les exécutables de kura-agent sont vérifiés contre le `SHA256SUMS` de la même release :
 cela protège d'un fichier corrompu, pas d'une release publiée par quelqu'un qui aurait pris la
 main sur le dépôt. Les adresses de téléchargement sont limitées aux releases de
 `E-C-G/kura-agent` ; signer les releases (clé publique intégrée à la console) fermerait ce point.
 
-Sur le poste, kit décompressé, dans une console d'administration :
+Sur un poste Windows, kit décompressé, dans une console d'administration :
 
 ```bat
 kura-agent.exe install --package acme-srv01-20261026.kura
 ```
 
+Sur un poste Ubuntu, kit décompressé, dans un terminal ouvert dans son dossier :
+
+```sh
+sudo apt install ./kura-agent_0.7.0_amd64.deb
+sudo kura-agent install --package acme-portable01-20261026.kura
+sudo systemctl start --no-block kura-sync.service   # première sauvegarde
+```
+
 `install` demande le mot de passe, installe la CLI AWS si elle manque, range les secrets dans
-le coffre, vérifie l'accès au bucket, crée la tâche planifiée et l'icône, puis supprime le
-paquet. Une fois la première sauvegarde réussie, *Confirmer l'installation* sur la page du
-bucket.
+le coffre, vérifie l'accès au bucket, crée la tâche planifiée et l'icône (Windows) ou le
+compte `kura-agent` et le minuteur `kura-sync.timer` (Ubuntu), puis supprime le paquet. Une
+fois la première sauvegarde réussie, *Confirmer l'installation* sur la page du bucket.
 
 ## Sécurité
 
@@ -484,7 +502,7 @@ Arborescence :
 | `internal/wasabi` | lecture des réglages S3, API Stats, modèle de réglages et audit |
 | `internal/jobs` | relevés (réglages, usage), actualisation quotidienne, synthèse et alertes |
 | `internal/poste` | configuration du poste : modèle, vérification (code de l'agent et règles de la console) |
-| `internal/kit` | kit d'installation : kura-agent et CLI AWS en cache, zip |
+| `internal/kit` | kit d'installation (Windows, Ubuntu) : kura-agent et CLI AWS en cache, zip |
 | `internal/web` | serveur local, sessions, pages (htmx, Chart.js embarqués) |
 
 ## Licences tierces

@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,10 +31,12 @@ type fakeKit struct {
 	calls atomic.Int32
 	dir   string
 	gate  chan struct{} // non nil : Prepare attend sa fermeture
+	last  kit.Target
 }
 
-func (f *fakeKit) Prepare(context.Context) (kit.Components, func(), error) {
+func (f *fakeKit) Prepare(_ context.Context, t kit.Target) (kit.Components, func(), error) {
 	f.calls.Add(1)
+	f.last = t
 	if f.gate != nil {
 		<-f.gate
 	}
@@ -47,8 +50,19 @@ func (f *fakeKit) Prepare(context.Context) (kit.Components, func(), error) {
 		}
 		return p
 	}
-	return kit.Components{AgentVersion: "0.6.0", AgentExe: write("kura-agent.exe", "MZ agent"), AgentWExe: write("kura-agentw.exe", "MZ agentw"),
-		AgentSHA256: strings.Repeat("a", 64), MSI: write(kit.MSIName, "msi"), MSISHA256: strings.Repeat("b", 64)}, func() {}, nil
+	c := kit.Components{Target: t, AgentVersion: "0.7.0", AgentSHA256: strings.Repeat("a", 64), AWSFile: t.AWSName(), AWSSHA256: strings.Repeat("b", 64)}
+	if t.Linux() {
+		c.AgentFile = kit.DebName("0.7.0", t.Arch)
+		c.Files = []kit.File{{Name: c.AgentFile, Path: write(c.AgentFile, "!<arch>\ndebian-binary")}}
+	} else {
+		c.AgentFile = "kura-agent.exe"
+		c.Files = []kit.File{{Name: "kura-agent.exe", Path: write("kura-agent.exe", "MZ agent")}, {Name: "kura-agentw.exe", Path: write("kura-agentw.exe", "MZ agentw")}}
+	}
+	c.Files = append(c.Files, kit.File{Name: c.AWSFile, Path: write(c.AWSFile, "aws")})
+	if t.Linux() {
+		c.Files = append(c.Files, kit.File{Name: c.AWSFile + ".sig", Path: write(c.AWSFile+".sig", "sig")})
+	}
+	return c, func() {}, nil
 }
 
 var (
@@ -181,7 +195,7 @@ func TestInstallPackageAndKit(t *testing.T) {
 		}
 	}
 	readme := string(files["kura-acme-srv01/LISEZMOI.txt"])
-	if !strings.Contains(readme, "install --package acme-srv01-") || strings.Contains(readme, pm[1]) {
+	if fk.last != kit.Windows || !strings.Contains(readme, "kura-agent.exe install --package acme-srv01-") || !strings.Contains(readme, "\r\n") || strings.Contains(readme, pm[1]) {
 		t.Fatalf("LISEZMOI :\n%s", readme)
 	}
 	c, err := pack.Open(packData, pm[1])
@@ -212,7 +226,7 @@ func TestInstallPackageAndKit(t *testing.T) {
 	}
 
 	// Configuration devenue invalide (règles plus strictes) : plus de paquet d'installation.
-	if err := hn.st.SavePosteConfig(ctx, "acme-srv01", strings.Replace(text, "bucket: acme-srv01", "bucket: autre", 1)); err != nil {
+	if err := hn.st.SavePosteConfig(ctx, "acme-srv01", store.PlatformWindows, strings.Replace(text, "bucket: acme-srv01", "bucket: autre", 1)); err != nil {
 		t.Fatal(err)
 	}
 	n := hn.keyCount()
@@ -222,6 +236,93 @@ func TestInstallPackageAndKit(t *testing.T) {
 	}
 	if !strings.Contains(hn.do("GET", "/buckets/acme-srv01", nil, nil).Body.String(), "à corriger") {
 		t.Fatal("configuration refusée non signalée")
+	}
+}
+
+func TestLinuxPosteAndKit(t *testing.T) {
+	hn, tok := adminHarness(t, nil)
+	fk := &fakeKit{t: t, dir: t.TempDir()}
+	hn.srv.Kit = fk
+	ctx := context.Background()
+	b, _ := hn.st.Bucket(ctx, "acme-srv01")
+
+	// Modèle de départ Ubuntu, choisi par lien.
+	page := hn.do("GET", "/buckets/acme-srv01/poste?systeme=linux-amd64", nil, nil).Body.String()
+	m := yamlRe.FindStringSubmatch(page)
+	if m == nil || !strings.Contains(html.UnescapeString(m[1]), "source: /home/") || !strings.Contains(page, `<option value="linux-amd64" selected>`) {
+		t.Fatalf("modèle Ubuntu :\n%s", page)
+	}
+	text := poste.TemplateFor(b, store.PlatformLinuxAMD64)
+	save := func(platform, yaml string) *httptest.ResponseRecorder {
+		return hn.do("POST", "/buckets/acme-srv01/poste", url.Values{"csrf": {tok}, "yaml": {yaml}, "platform": {platform}}, nil)
+	}
+	// Modèle Windows pour un poste Ubuntu, ou système inconnu : refusés, rien d'enregistré.
+	for _, c := range [][2]string{{"linux-amd64", poste.TemplateFor(b, store.PlatformWindows)}, {"darwin-arm64", text}} {
+		if rec := save(c[0], c[1]); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "refus") && !strings.Contains(rec.Body.String(), "inconnu") {
+			t.Fatalf("%s : %d\n%s", c[0], rec.Code, rec.Body.String())
+		}
+	}
+	if _, err := hn.st.PosteConfig(ctx, "acme-srv01"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("configuration refusée enregistrée")
+	}
+	expectRedirect(t, save("linux-amd64", text), "/buckets/acme-srv01")
+	if b, _ := hn.st.Bucket(ctx, "acme-srv01"); b.Platform != store.PlatformLinuxAMD64 {
+		t.Fatalf("système : %q", b.Platform)
+	}
+	body := hn.do("GET", "/buckets/acme-srv01", nil, nil).Body.String()
+	if !strings.Contains(body, "Ubuntu 24.04 (amd64)") || !strings.Contains(body, "sudo apt install") {
+		t.Fatal("page du bucket sans le système du poste")
+	}
+
+	rec := hn.do("POST", "/buckets/acme-srv01/cles", installForm(hn, tok, map[string]string{"hc-url": "https://hc-ping.example/uuid-poste"}), nil)
+	page = rec.Body.String()
+	pm, km := passwordRe.FindStringSubmatch(page), kitURLRe.FindStringSubmatch(page)
+	if pm == nil || km == nil || !strings.Contains(page, "sudo kura-agent install --package") || !strings.Contains(page, "sudo apt install") || strings.Contains(page, "kura-agent.exe install") {
+		t.Fatalf("page du kit :\n%s", page)
+	}
+	// Le système change après la création du paquet : le kit suit le paquet.
+	if err := hn.st.SavePosteConfig(ctx, "acme-srv01", store.PlatformLinuxARM64, text); err != nil {
+		t.Fatal(err)
+	}
+	rec = hn.do("GET", km[1], nil, nil)
+	if rec.Code != 200 || fk.last != (kit.Target{OS: "linux", Arch: "amd64"}) {
+		t.Fatalf("kit : %d, cible %v", rec.Code, fk.last)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		files[f.Name], _ = io.ReadAll(rc)
+		rc.Close()
+	}
+	for _, want := range []string{"kura-agent_0.7.0_amd64.deb", "awscli-exe-linux-x86_64.zip", "awscli-exe-linux-x86_64.zip.sig", "LISEZMOI.txt"} {
+		if files["kura-acme-srv01/"+want] == nil {
+			t.Errorf("%s absent du kit", want)
+		}
+	}
+	if files["kura-acme-srv01/kura-agent.exe"] != nil || files["kura-acme-srv01/AWSCLIV2.msi"] != nil {
+		t.Error("fichiers Windows dans le kit Ubuntu")
+	}
+	readme := string(files["kura-acme-srv01/LISEZMOI.txt"])
+	for _, want := range []string{"Ubuntu 24.04 (amd64)", "sudo apt install ./kura-agent_0.7.0_amd64.deb", "sudo kura-agent install --package acme-srv01-", "systemctl start --no-block kura-sync.service"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("LISEZMOI sans %q :\n%s", want, readme)
+		}
+	}
+	if strings.Contains(readme, "\r") || strings.Contains(readme, pm[1]) {
+		t.Fatalf("LISEZMOI :\n%q", readme)
+	}
+	if !strings.Contains(hn.do("GET", "/audit", nil, nil).Body.String(), "linux/amd64") {
+		t.Fatal("audit sans le système du kit")
+	}
+}
+
+func TestRunNowHint(t *testing.T) {
+	if !strings.Contains(runNowHint(store.PlatformLinuxARM64), "systemctl start") || !strings.Contains(runNowHint(store.PlatformWindows), "icône") {
+		t.Fatal(runNowHint(store.PlatformLinuxARM64))
 	}
 }
 

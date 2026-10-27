@@ -439,6 +439,8 @@ type packView struct {
 	Install  bool     // paquet d'installation complète
 	KitURL   string   // kit zip (installation complète)
 	Others   []string // autres secrets du paquet
+	Platform store.Platform
+	Linux    bool
 }
 
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
@@ -580,10 +582,11 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	file := fmt.Sprintf("%s-%s.kura", b.Name, now.Format("20060102"))
 	o.mu.Lock()
 	o.packs[token] = &pendingPack{bucket: b.Name, keyID: k.ID, file: file, data: data, expires: now.Add(packDownloadFor),
-		validUntil: now.Add(packValidFor), install: install}
+		validUntil: now.Add(packValidFor), install: install, platform: b.Platform}
 	o.mu.Unlock()
 	pv := packView{Bucket: b, KeyID: k.ID, UserName: user, CredName: credName, Password: pw,
-		URL: "/buckets/" + b.Name + "/paquet/" + token, File: file, Expires: now.Add(packValidFor), Install: install}
+		URL: "/buckets/" + b.Name + "/paquet/" + token, File: file, Expires: now.Add(packValidFor), Install: install,
+		Platform: platformOr(b), Linux: platformOr(b).Linux()}
 	if install {
 		pv.KitURL = "/buckets/" + b.Name + "/kit/" + token
 		for _, c := range others {
@@ -672,7 +675,7 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 			done("Wasabi ne dit pas si la clé a servi (" + err.Error() + ") : vérifier sur le poste qu'une sauvegarde a réussi avec elle, puis cocher « vérifié sur le poste » et confirmer.")
 			return
 		case err == nil && lastUsed.IsZero():
-			done("Cette clé n'a encore jamais servi : lancer une sauvegarde sur le poste (icône Kura → Sauvegarder maintenant), puis confirmer. Rien n'a été désactivé.")
+			done("Cette clé n'a encore jamais servi : lancer une sauvegarde sur le poste (" + runNowHint(b.Platform) + "), puis confirmer. Rien n'a été désactivé.")
 			return
 		}
 		if err := s.Store.SetKeyStatus(ctx, k.ID, store.KeyInstalled); err != nil {
