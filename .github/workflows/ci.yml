@@ -71,6 +71,13 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
           GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet ./...
 
+      # Vulnérabilités connues (bibliothèque standard du compilateur utilisé, dépendances) :
+      # la CI échoue si le code appelle une fonction touchée.
+      - name: govulncheck
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -tags mattn ./...
+
       - name: Tests (modernc, pilote de production)
         shell: bash
         run: |
@@ -123,7 +130,7 @@ jobs:
 
       - name: Modules
         shell: bash
-        run: go mod tidy
+        run: go mod download && go mod verify
 
       - name: Tests
         shell: bash
