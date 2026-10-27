@@ -311,8 +311,10 @@ d'accès, remise dans un paquet `.kura` chiffré (AES-256-GCM, PBKDF2-SHA256) :
 - sur le poste, `kura-agent import fichier.kura` (kura-agent 0.5 ou plus récent, console
   d'administration) essaie la clé auprès de Wasabi avant de remplacer l'ancienne ;
 - une fois la sauvegarde suivante réussie, *Confirmer l'installation* (nom du bucket à
-  retaper) : la console vérifie auprès de Wasabi que la nouvelle clé a déjà servi (sinon rien
-  n'est désactivé), puis désactive les clés qu'elle avait créées **avant** elle pour ce poste,
+  retaper) : la console vérifie auprès de Wasabi que la nouvelle clé a déjà servi ; Wasabi
+  mettant cette date à jour avec retard, la case « vérifié sur le poste » (une sauvegarde
+  réussie constatée sur le poste) en tient lieu, et le journal note laquelle des deux preuves a
+  servi ; sans aucune, rien n'est désactivé. Puis la console désactive les clés qu'elle avait créées **avant** elle pour ce poste,
   jamais une plus récente ; une clé désactivée reste réactivable,
   et devient supprimable après 7 jours. Une ancienne clé créée à la main dans Wasabi se
   désactive dans la console Wasabi (la console n'a de droits que sur les utilisateurs `kura-*`).
