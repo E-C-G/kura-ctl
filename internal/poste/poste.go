@@ -73,6 +73,11 @@ notify:
     type: healthchecks
     url: credential:hc-url       # URL de ping, saisie à la création du paquet
 
+# Proxy vers GitHub pour la recherche des nouvelles versions de l'agent (self-update),
+# si le réseau du poste en impose un ; sans identifiants.
+# update:
+#   proxy: http://proxy.example.com:3128
+
 logging:
   level: info
   retention_days: 90
@@ -112,6 +117,11 @@ notify:
   report:
     type: healthchecks
     url: credential:hc-url       # URL de ping, saisie à la création du paquet
+
+# Proxy vers GitHub pour la recherche des nouvelles versions de l'agent (self-update),
+# si le réseau du poste en impose un ; sans identifiants.
+# update:
+#   proxy: http://proxy.example.com:3128
 
 logging:
   level: info
