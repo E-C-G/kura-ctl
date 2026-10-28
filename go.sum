@@ -1,5 +1,5 @@
-github.com/E-C-G/kura-agent v0.8.0 h1:I5/129Y7VkdUxg0cU0P7TRMTQ+6aMtFdbekN9QnhnSc=
-github.com/E-C-G/kura-agent v0.8.0/go.mod h1:8icbzTEo5DSpUoJP150ZcjHsHoL7FqFU3PA82I2iXig=
+github.com/E-C-G/kura-agent v0.11.0 h1:QO8LCeY8mL1sBl1Ke5/Y9T1v4G5JR+MRwoEVdYb8pps=
+github.com/E-C-G/kura-agent v0.11.0/go.mod h1:aS967wSBQG52xkt2+jtJ4jJCsY5r3FQgYy7/ZncqCZk=
 github.com/aws/aws-sdk-go-v2 v1.47.4 h1:bTvk6UdSSSvaQsfLVj1JRDEEqj/PDRwGf1KanaRzau0=
 github.com/aws/aws-sdk-go-v2 v1.47.4/go.mod h1:XkrjAZvr705Nytv6PkPUhoSB2W9+vVHBp5oAWpkh8Ak=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.24 h1:t7FxqJ5KHDeKceyD4HtGaG6z7hMSeVGjs5/4c+L5ArM=

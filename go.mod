@@ -7,7 +7,7 @@ go 1.26.0
 toolchain go1.26.10
 
 require (
-	github.com/E-C-G/kura-agent v0.8.0
+	github.com/E-C-G/kura-agent v0.11.0
 	github.com/aws/aws-sdk-go-v2 v1.47.4
 	github.com/aws/aws-sdk-go-v2/service/iam v1.64.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
