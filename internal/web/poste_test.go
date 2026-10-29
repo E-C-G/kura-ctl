@@ -381,3 +381,46 @@ func TestKitBusyAndTokenKinds(t *testing.T) {
 		t.Fatalf("kit expiré : %d", c)
 	}
 }
+
+// Configuration avec préparations : enregistrée, la page du poste montre les commandes de
+// création du rôle et les destinataires du chiffrement ; le mot de passe de la base est
+// demandé à la création du paquet.
+func TestPostePreparations(t *testing.T) {
+	hn, tok := adminHarness(t, nil)
+	text := strings.Replace(poste.Template(store.Bucket{Name: "acme-srv01", Region: "eu-central-1", Poste: "SRV01"}), "\njobs:\n", `
+tools:
+  pg_dump: "C:/Program Files/PostgreSQL/17/bin/pg_dump.exe"
+prepare:
+  - id: compta-db
+    type: db_export
+    engine: postgresql
+    user: kura_backup
+    password: credential:compta-db
+  - id: compta-chiffre
+    type: age
+    input: compta-db
+    recipients:
+      - age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+
+jobs:
+  - id: compta
+    source: "${STAGING:compta-chiffre}"
+    destination: BASES/COMPTA
+`, 1)
+	expectRedirect(t, hn.do("POST", "/buckets/acme-srv01/poste", url.Values{"csrf": {tok}, "yaml": {text}}, nil), "/buckets/acme-srv01")
+	page := html.UnescapeString(hn.do("GET", "/buckets/acme-srv01/poste", nil, nil).Body.String())
+	for _, want := range []string{"Rôles des bases", `CREATE ROLE "kura_backup" LOGIN PASSWORD '…';`, "Chiffrement",
+		"age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p", "préparation compta-db"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page du poste sans %q", want)
+		}
+	}
+	if body := hn.do("GET", "/buckets/acme-srv01", nil, nil).Body.String(); !strings.Contains(body, `name="secret-compta-db"`) {
+		t.Fatal("mot de passe de la base non demandé à la création du paquet")
+	}
+	// Clair envoyé : refusé, rien n'est enregistré à la place.
+	bad := strings.Replace(text, "${STAGING:compta-chiffre}", "${STAGING:compta-db}", 1)
+	if rec := hn.do("POST", "/buckets/acme-srv01/poste", url.Values{"csrf": {tok}, "yaml": {bad}}, nil); !strings.Contains(rec.Body.String(), "son clair ne part jamais") {
+		t.Fatal("clair envoyé accepté")
+	}
+}

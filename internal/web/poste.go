@@ -197,6 +197,9 @@ func kitReadme(b store.Bucket, p *pendingPack, c kit.Components, now time.Time) 
 		sb.WriteString("     schtasks /Run /TN \\Kura\\Sync), vérifier qu'elle réussit, puis confirmer\n")
 		sb.WriteString("     l'installation de la clé sur la page du bucket dans la console.\n\n")
 	}
+	if c.NewerAgent != "" {
+		fmt.Fprintf(&sb, "kura-agent %s est publié ; ce kit livre %s, dernière version de la série dont\nla console vérifie les configurations. Mettre à jour kura-ctl pour livrer la suivante.\n\n", c.NewerAgent, c.AgentVersion)
+	}
 	sb.WriteString("Après l'installation, supprimer ce dossier : le paquet contenait la clé du poste.\n")
 	return sb.String()
 }

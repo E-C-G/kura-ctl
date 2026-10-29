@@ -67,6 +67,30 @@ jobs:
       - "*$RECYCLE.BIN*"
       - "*System Volume Information*"
 
+# Préparations avant les jobs (facultatif) : archive zip, export de base, chiffrement
+# gpg ou age. Outils installés sur le poste, déclarés par chemin complet ; le résultat
+# part par un job dont la source est ${STAGING:<id>}. Voir le README de kura-agent.
+# tools:
+#   zip: "C:/Program Files/7-Zip/7z.exe"
+#   pg_dump: "C:/Program Files/PostgreSQL/17/bin/pg_dump.exe"
+# encryption:
+#   age:
+#     recipients:
+#       - age1…                         # clé publique ; la clé privée reste hors du poste
+# prepare:
+#   - id: compta-db
+#     type: db_export
+#     engine: postgresql                # postgresql | mysql | sqlserver (Windows)
+#     user: kura_backup                 # rôle en lecture seule (commandes affichées ici)
+#     password: credential:compta-db    # saisi à la création du paquet
+#   - id: compta-chiffre
+#     type: age
+#     input: compta-db                  # export chiffré au fil de l'eau
+# et dans jobs :
+#   - id: compta
+#     source: "${STAGING:compta-chiffre}"
+#     destination: BASES/COMPTA
+
 notify:
   toast_on: [failure, warning]
   report:
@@ -113,6 +137,30 @@ jobs:
       - "*/.cache/*"
       - "*/node_modules/*"
 
+# Préparations avant les jobs (facultatif) : archive zip, export de base, chiffrement
+# gpg ou age. Outils installés sur le poste, déclarés par chemin complet ; le résultat
+# part par un job dont la source est ${STAGING:<id>}. Voir le README de kura-agent.
+# tools:
+#   zip: /usr/bin/zip
+#   pg_dump: /usr/lib/postgresql/16/bin/pg_dump
+# encryption:
+#   age:
+#     recipients:
+#       - age1…                         # clé publique ; la clé privée reste hors du poste
+# prepare:
+#   - id: compta-db
+#     type: db_export
+#     engine: postgresql                # postgresql | mysql | sqlserver (Windows)
+#     user: kura_backup                 # rôle en lecture seule (commandes affichées ici)
+#     password: credential:compta-db    # saisi à la création du paquet
+#   - id: compta-chiffre
+#     type: age
+#     input: compta-db                  # export chiffré au fil de l'eau
+# et dans jobs :
+#   - id: compta
+#     source: "${STAGING:compta-chiffre}"
+#     destination: BASES/COMPTA
+
 notify:
   report:
     type: healthchecks
@@ -146,8 +194,15 @@ type Checked struct {
 	Config *config.Config
 	// KeyName : nom du secret de la clé du poste (profile.aws_credentials).
 	KeyName string
-	// Secrets : autres secrets à saisir à la création du paquet.
+	// Secrets : autres secrets à saisir à la création du paquet (mots de passe des
+	// bases compris).
 	Secrets []Secret
+	// Warnings : ce qui n'empêche pas d'installer mais mérite d'être lu.
+	Warnings []string
+	// Roles : commandes de création du rôle de chaque export de base, à lancer sur le
+	// serveur de la base ; Encryptions : destinataires de chaque chiffrement.
+	Roles       []RoleHelp
+	Encryptions []Encryption
 }
 
 // fakeEnv : la console ne connaît pas la machine du poste. Les comptes sont supposés
@@ -226,7 +281,7 @@ func CheckFor(text string, b store.Bucket, p store.Platform) (Checked, error) {
 			}
 		}
 	}
-	c := Checked{Config: cfg, KeyName: keyName}
+	c := Checked{Config: cfg, KeyName: keyName, Warnings: cfg.Warnings(), Roles: roleHelps(cfg), Encryptions: encryptions(cfg)}
 	for _, ref := range cfg.CredentialRefs() {
 		if !pack.CredentialName.MatchString(ref.Name) {
 			add("%s : nom de secret %q invalide (minuscules, chiffres et '-', 40 caractères au plus)", ref.Field, ref.Name)
@@ -247,9 +302,10 @@ func CheckFor(text string, b store.Bucket, p store.Platform) (Checked, error) {
 // système, fonctions propres à Windows). kura-agent le refuserait à l'installation.
 func platformErrors(cfg *config.Config, p store.Platform) []string {
 	var errs []string
+	errs = append(errs, prepareErrors(cfg, p)...)
 	if !p.Linux() {
 		for i, j := range cfg.Jobs {
-			if !windowsAbs(j.Source) {
+			if j.Prepare == "" && !windowsAbs(j.Source) { // ${STAGING:x} : zone de préparation du poste
 				errs = append(errs, fmt.Sprintf("jobs[%d].source : %q, chemin Windows complet attendu (D:/Donnees, ${PROFILE:compte}/Documents, \\\\serveur\\partage)", i, j.Source))
 			}
 		}
@@ -259,7 +315,7 @@ func platformErrors(cfg *config.Config, p store.Platform) []string {
 		return errs
 	}
 	for i, j := range cfg.Jobs {
-		if !strings.HasPrefix(j.Source, "/") {
+		if j.Prepare == "" && !strings.HasPrefix(j.Source, "/") {
 			errs = append(errs, fmt.Sprintf("jobs[%d].source : %q, chemin Linux complet attendu (/home/compte/Documents)", i, j.Source))
 		}
 	}

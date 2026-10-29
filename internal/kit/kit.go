@@ -1,5 +1,6 @@
 // Package kit assemble le kit d'installation d'un poste : un zip avec kura-agent
-// (dernière version publiée), la CLI AWS v2 telle qu'AWS la distribue et le paquet
+// (dernière version publiée de la série dont la console vérifie les configurations,
+// AgentSeries), la CLI AWS v2 telle qu'AWS la distribue et le paquet
 // .kura, plus un LISEZMOI. Sur le poste, une seule commande installe tout :
 //
 //	Windows   kura-agent.exe install --package <bucket>.kura
@@ -28,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +51,11 @@ const (
 	AssetPrefix = "https://github.com/E-C-G/kura-agent/releases/download/"
 	// AWSMaxAge : au-delà, la CLI AWS en cache est retéléchargée (versions récentes).
 	AWSMaxAge = 30 * 24 * time.Hour
+	// AgentSeries : série (majeure.mineure) de kura-agent dont la console importe
+	// pkg/config et pkg/pack (go.mod). Le kit livre la dernière version publiée de cette
+	// série, correctifs compris, jamais une série plus récente : elle pourrait refuser
+	// une configuration que la console a acceptée (ou en lire le format autrement).
+	AgentSeries = "0.17"
 
 	maxAWS      = 300 << 20
 	maxSig      = 64 << 10
@@ -103,6 +110,9 @@ func (t Target) AWSName() string {
 type Source struct {
 	HTTP        *http.Client
 	ReleasesAPI string
+	// Series : série de kura-agent livrée (AgentSeries) ; vide : la dernière release,
+	// quelle qu'elle soit (essais).
+	Series      string
 	AWSBaseURL  string
 	AssetPrefix string
 	CacheDir    string
@@ -116,7 +126,7 @@ type Source struct {
 // NewSource : source réelle, cache dans dir.
 func NewSource(dir string) *Source {
 	return &Source{HTTP: &http.Client{Timeout: 15 * time.Minute, CheckRedirect: httpsOnly}, ReleasesAPI: ReleasesAPI, AWSBaseURL: AWSBaseURL,
-		AssetPrefix: AssetPrefix, CacheDir: dir, Now: time.Now}
+		AssetPrefix: AssetPrefix, CacheDir: dir, Now: time.Now, Series: AgentSeries}
 }
 
 // httpsOnly refuse une redirection vers une adresse non HTTPS.
@@ -146,11 +156,16 @@ type Components struct {
 	AWSSHA256    string
 	AWSDate      time.Time
 	Files        []File // dans l'ordre du kit, LISEZMOI et paquet .kura en plus
+	// NewerAgent : version publiée d'une série plus récente, non livrée (la console
+	// doit d'abord passer à cette série) ; "" sinon.
+	NewerAgent string
 }
 
 type release struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
+	TagName    string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
+	Assets     []struct {
 		Name string `json:"name"`
 		URL  string `json:"browser_download_url"`
 	} `json:"assets"`
@@ -193,21 +208,75 @@ func (s *Source) prepare(ctx context.Context, t Target) (Components, error) {
 	return c, nil
 }
 
-// latest lit la dernière release et vérifie qu'elle convient au système.
-func (s *Source) latest(ctx context.Context, min string) (release, string, error) {
-	var rel release
+// tagPattern : tag de release de kura-agent (il nomme aussi le dossier du cache).
+var tagPattern = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`)
+
+// series : majeure.mineure d'une version.
+func series(ver string) string {
+	parts := strings.SplitN(ver, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[0] + "." + parts[1]
+}
+
+// latest choisit la release livrée : la dernière publiée si elle est de la série de la
+// console, sinon la plus récente de cette série ; puis vérifie qu'elle convient au
+// système (min). newer : version d'une série plus récente, laissée de côté.
+func (s *Source) latest(ctx context.Context, min string) (rel release, ver, newer string, err error) {
 	body, err := s.get(ctx, s.ReleasesAPI, 1<<20)
 	if err != nil {
-		return rel, "", fmt.Errorf("dernière release : %w", err)
+		return rel, "", "", fmt.Errorf("dernière release : %w", err)
 	}
 	if err := json.Unmarshal(body, &rel); err != nil {
-		return rel, "", fmt.Errorf("dernière release illisible : %w", err)
+		return rel, "", "", fmt.Errorf("dernière release illisible : %w", err)
 	}
-	ver := strings.TrimPrefix(rel.TagName, "v")
+	if !tagPattern.MatchString(rel.TagName) {
+		return rel, "", "", fmt.Errorf("dernière release : tag %q inattendu", rel.TagName)
+	}
+	ver = strings.TrimPrefix(rel.TagName, "v")
+	if s.Series != "" && series(ver) != s.Series {
+		if !AtLeast(ver, s.Series+".0") {
+			return rel, "", "", fmt.Errorf("dernière version publiée %s, plus ancienne que la série %s dont la console vérifie les configurations", rel.TagName, s.Series)
+		}
+		newer = ver
+		if rel, ver, err = s.inSeries(ctx); err != nil {
+			return rel, "", "", err
+		}
+	}
 	if !AtLeast(ver, min) {
-		return rel, "", fmt.Errorf("dernière version publiée %q : %s ou plus récente nécessaire pour installer depuis un paquet", rel.TagName, min)
+		return rel, "", "", fmt.Errorf("dernière version publiée %q : %s ou plus récente nécessaire pour installer depuis un paquet", rel.TagName, min)
 	}
-	return rel, ver, nil
+	return rel, ver, newer, nil
+}
+
+// inSeries : la release publiée la plus récente de la série de la console (ni brouillon
+// ni préversion), dans la liste des releases.
+func (s *Source) inSeries(ctx context.Context) (release, string, error) {
+	list := strings.TrimSuffix(s.ReleasesAPI, "/latest") + "?per_page=100"
+	body, err := s.get(ctx, list, 8<<20)
+	if err != nil {
+		return release{}, "", fmt.Errorf("liste des releases : %w", err)
+	}
+	var all []release
+	if err := json.Unmarshal(body, &all); err != nil {
+		return release{}, "", fmt.Errorf("liste des releases illisible : %w", err)
+	}
+	var best release
+	bestVer := ""
+	for _, r := range all {
+		v := strings.TrimPrefix(r.TagName, "v")
+		if r.Draft || r.Prerelease || !tagPattern.MatchString(r.TagName) || strings.Contains(v, "-") || series(v) != s.Series {
+			continue
+		}
+		if bestVer == "" || AtLeast(v, bestVer) {
+			best, bestVer = r, v
+		}
+	}
+	if bestVer == "" {
+		return release{}, "", fmt.Errorf("aucune release kura-agent %s.x publiée parmi les 100 dernières : mettre à jour kura-ctl", s.Series)
+	}
+	return best, bestVer, nil
 }
 
 // asset télécharge un fichier de la release, vérifié avec son SHA256SUMS.
@@ -254,11 +323,11 @@ func cachedSHA256(p string) (string, bool) {
 }
 
 func (s *Source) agentWindows(ctx context.Context, c *Components) error {
-	rel, ver, err := s.latest(ctx, MinAgent)
+	rel, ver, newer, err := s.latest(ctx, MinAgent)
 	if err != nil {
 		return err
 	}
-	c.AgentVersion, c.AgentFile = ver, "kura-agent.exe"
+	c.AgentVersion, c.AgentFile, c.NewerAgent = ver, "kura-agent.exe", newer
 	dir := filepath.Join(s.CacheDir, "kura-agent-"+ver)
 	exe, wexe := filepath.Join(dir, "kura-agent.exe"), filepath.Join(dir, "kura-agentw.exe")
 	c.Files = []File{{"kura-agent.exe", exe}, {"kura-agentw.exe", wexe}}
@@ -317,10 +386,11 @@ func DebName(ver, arch string) string {
 }
 
 func (s *Source) agentDeb(ctx context.Context, c *Components) error {
-	rel, ver, err := s.latest(ctx, MinAgentLinux)
+	rel, ver, newer, err := s.latest(ctx, MinAgentLinux)
 	if err != nil {
 		return err
 	}
+	c.NewerAgent = newer
 	name := DebName(ver, c.Target.Arch)
 	dir := filepath.Join(s.CacheDir, "kura-agent-"+ver)
 	deb := filepath.Join(dir, name)
