@@ -11,6 +11,7 @@ puis corrige ces réglages, crée la clé limitée de chaque poste et prépare s
 | 2 « Sécuriser l'existant » | clé `kura-ctl-admin`, stratégie de bucket, cycle de vie, rétention, clé de poste et paquet `.kura` | **fait** |
 | 3 « Préparer les postes » | configuration du poste, paquet d'installation complète, kit zip (kura-agent, CLI AWS) pour Windows et Ubuntu, rotation guidée | **fait** |
 | 4 « Créer proprement » | bucket neuf depuis le modèle, avec Object Lock | **fait** |
+| 5 « Préparations » | archives, exports de bases et chiffrement (kura-agent 0.17) vérifiés selon le système du poste, commandes de création du rôle des bases, destinataires du chiffrement | **fait** |
 
 Toute écriture chez Wasabi passe par un aperçu de ce qui sera écrit, la saisie du nom du
 bucket, puis une relecture du réglage chez Wasabi ; le résultat va au journal d'audit.
@@ -410,7 +411,29 @@ l'agent (`pkg/config`), plus les règles de la console :
 - sources en chemins complets du système du poste (`D:/Donnees`, `${PROFILE:alice}/Documents`,
   `\\nas\partage` ; `/home/alice/Documents` sous Linux, où `${PROFILE:alice}` vaut `/home/alice`) ;
 - sous Linux, ni `pre_tasks`, ni `post_tasks`, ni `tray` (pas d'icône) ;
-- l'existence des sources et des comptes n'est vérifiée que sur le poste.
+- préparations (`tools`, `prepare`, `encryption`, voir ci-dessous) : outils et sources en chemins
+  complets du système du poste ;
+- l'existence des sources, des comptes et des outils, leurs droits et les clés gpg ne sont
+  vérifiés que sur le poste (`kura-agent install`, `validate`).
+
+**Préparations.** Archives zip, exports de bases (PostgreSQL, MySQL/MariaDB, SQL Server) et
+chiffrement gpg ou age s'écrivent dans le `config.yaml` (format et exemples dans le README de
+kura-agent ; un exemple commenté figure dans le modèle de départ). La console les vérifie avec
+le code de l'agent, puis selon le système du poste :
+
+- outils (`tools`) et sources en chemins complets du système, jamais sur un partage réseau ni en
+  snap ; sous Windows, `tools.zip` est 7-Zip (Info-ZIP n'y est plus maintenu) ;
+- `engine: sqlserver` sous Windows seulement ; pas de `socket` sous Windows ;
+- un job envoie `${STAGING:<id>}`, jamais le clair d'une préparation chiffrée ;
+- mot de passe d'une base en `credential:<nom>` seulement : il est demandé, comme l'URL de ping,
+  à la création du paquet, et n'est jamais conservé par la console ;
+- clés publiques seulement : clé privée gpg ou identité age (`AGE-SECRET-KEY-…`) refusées.
+
+La page du poste montre ensuite, pour chaque export de base, les commandes qui créent le rôle
+dédié en lecture seule sur le serveur (PostgreSQL `pg_read_all_data`, MySQL/MariaDB `SELECT,
+SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, PROCESS`, SQL Server `db_backupoperator` dans chaque base,
+`CREATE ANY DATABASE` avec `verify`), sans mot de passe ; et, pour chaque chiffrement, les
+destinataires (empreintes gpg groupées comme dans Kleopatra, clés age) que chaque fichier aura.
 
 Le texte est conservé tel que saisi (commentaires compris), revérifié à chaque affichage et à
 chaque création de paquet.
@@ -427,12 +450,18 @@ l'autre, une seule fois), préparé pour le système du poste au moment de la cr
 
 | Système | Fichier | Origine |
 |---|---|---|
-| Windows | `kura-agent.exe`, `kura-agentw.exe` | dernière release de kura-agent (0.6.0 au moins), zip vérifié avec son `SHA256SUMS` |
+| Windows | `kura-agent.exe`, `kura-agentw.exe` | dernière release de kura-agent de la série de la console, zip vérifié avec son `SHA256SUMS` |
 | Windows | `AWSCLIV2.msi` | `https://awscli.amazonaws.com/AWSCLIV2.msi` |
-| Ubuntu | `kura-agent_<version>_<arch>.deb` | dernière release de kura-agent (0.7.0 au moins), vérifié avec son `SHA256SUMS` |
+| Ubuntu | `kura-agent_<version>_<arch>.deb` | dernière release de kura-agent de la série de la console, vérifié avec son `SHA256SUMS` |
 | Ubuntu | `awscli-exe-linux-<x86_64\|aarch64>.zip` et `.sig` | `https://awscli.amazonaws.com/`, la signature PGP avec le zip |
 | tous | `<bucket>-<date>.kura` | le paquet chiffré |
 | tous | `LISEZMOI.txt` | contenu, sommes SHA-256, étapes sur le poste |
+
+**Version de kura-agent livrée.** La console vérifie les configurations avec le code d'une série
+de kura-agent (0.17, celle de son `go.mod`) : le kit livre la dernière version publiée de cette
+série, correctifs compris, jamais une série plus récente, qui pourrait refuser une configuration
+acceptée ici. Quand une série plus récente existe, le `LISEZMOI.txt` le signale : mettre à jour
+kura-ctl pour la livrer. Le poste passe ensuite aux versions suivantes par `self-update`.
 
 Les composants sont gardés en cache dans `<données>/kit` ; la CLI AWS est retéléchargée au-delà
 de 30 jours. Si GitHub ou AWS est injoignable, le kit échoue sans consommer le paquet, qui
