@@ -12,6 +12,7 @@ puis corrige ces réglages, crée la clé limitée de chaque poste et prépare s
 | 3 « Préparer les postes » | configuration du poste, paquet d'installation complète, kit zip (kura-agent, CLI AWS) pour Windows et Ubuntu, rotation guidée | **fait** |
 | 4 « Créer proprement » | bucket neuf depuis le modèle, avec Object Lock | **fait** |
 | 5 « Préparations » | archives, exports de bases et chiffrement (kura-agent 0.17) vérifiés selon le système du poste, commandes de création du rôle des bases, destinataires du chiffrement | **fait** |
+| 5 bis « Volumes Docker » | `docker_volume` (kura-agent 0.18) : postes Ubuntu seulement, coût du gel ou copie non figée signalés, volumes et rechargement sur la page du poste | **fait** |
 
 Toute écriture chez Wasabi passe par un aperçu de ce qui sera écrit, la saisie du nom du
 bucket, puis une relecture du réglage chez Wasabi ; le résultat va au journal d'audit.
@@ -416,14 +417,17 @@ l'agent (`pkg/config`), plus les règles de la console :
 - l'existence des sources, des comptes et des outils, leurs droits et les clés gpg ne sont
   vérifiés que sur le poste (`kura-agent install`, `validate`).
 
-**Préparations.** Archives zip, exports de bases (PostgreSQL, MySQL/MariaDB, SQL Server) et
-chiffrement gpg ou age s'écrivent dans le `config.yaml` (format et exemples dans le README de
+**Préparations.** Archives zip, exports de bases (PostgreSQL, MySQL/MariaDB, SQL Server), volumes
+Docker et chiffrement gpg ou age s'écrivent dans le `config.yaml` (format et exemples dans le README de
 kura-agent ; un exemple commenté figure dans le modèle de départ). La console les vérifie avec
 le code de l'agent, puis selon le système du poste :
 
 - outils (`tools`) et sources en chemins complets du système, jamais sur un partage réseau ni en
   snap ; sous Windows, `tools.zip` est 7-Zip (Info-ZIP n'y est plus maintenu) ;
 - `engine: sqlserver` sous Windows seulement ; pas de `socket` sous Windows ;
+- `docker_volume` sous Ubuntu seulement (Docker Engine en root) ; avertissement à
+  l'enregistrement : avec le gel (`pause: true`, défaut), le service rejoint le groupe `docker`,
+  l'équivalent des droits root sur la machine ; avec `pause: false`, la copie n'est pas figée ;
 - un job envoie `${STAGING:<id>}`, jamais le clair d'une préparation chiffrée ;
 - mot de passe d'une base en `credential:<nom>` seulement : il est demandé, comme l'URL de ping,
   à la création du paquet, et n'est jamais conservé par la console ;
@@ -433,7 +437,11 @@ La page du poste montre ensuite, pour chaque export de base, les commandes qui c
 dédié en lecture seule sur le serveur (PostgreSQL `pg_read_all_data`, MySQL/MariaDB `SELECT,
 SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, PROCESS`, SQL Server `db_backupoperator` dans chaque base,
 `CREATE ANY DATABASE` avec `verify`), sans mot de passe ; et, pour chaque chiffrement, les
-destinataires (empreintes gpg groupées comme dans Kleopatra, clés age) que chaque fichier aura.
+destinataires (empreintes gpg groupées comme dans Kleopatra, clés age) que chaque fichier aura ;
+pour chaque préparation `docker_volume`, ses volumes, l'arrêt attendu (conteneurs gelés au plus
+`max_pause`, ou aucun) et les commandes de rechargement d'un volume (restauration de l'archive,
+volume recréé, `tar --numeric-owner`). Le socket Docker se joint sans secret : rien de plus à
+saisir à la création du paquet.
 
 **Clés du chiffrement.** Le client fournit ses clés publiques et garde seul les clés privées :
 ni le poste, ni la console, ni l'éditeur n'en détiennent, et l'éditeur ne peut pas déchiffrer
@@ -464,7 +472,7 @@ l'autre, une seule fois), préparé pour le système du poste au moment de la cr
 | tous | `LISEZMOI.txt` | contenu, sommes SHA-256, étapes sur le poste |
 
 **Version de kura-agent livrée.** La console vérifie les configurations avec le code d'une série
-de kura-agent (0.17, celle de son `go.mod`) : le kit livre la dernière version publiée de cette
+de kura-agent (0.18, celle de son `go.mod`) : le kit livre la dernière version publiée de cette
 série, correctifs compris, jamais une série plus récente, qui pourrait refuser une configuration
 acceptée ici. Quand une série plus récente existe, le `LISEZMOI.txt` le signale : mettre à jour
 kura-ctl pour la livrer. Le poste passe ensuite aux versions suivantes par `self-update`.

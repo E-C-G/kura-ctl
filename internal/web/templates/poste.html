@@ -29,6 +29,21 @@
   <tbody>{{range .}}<tr><td>{{.ID}} <span class="muted">({{.Type}})</span></td><td>{{.From}}</td><td>{{range $i, $r := .Recipients}}{{if $i}}<br>{{end}}<code>{{$r}}</code>{{end}}{{if .Default}}<br><span class="muted">section encryption</span>{{end}}</td></tr>{{end}}</tbody>
 </table>
 {{end}}{{end}}
+{{if and (not $d.Err) (not $d.Template)}}{{with $d.Checked.Dockers}}
+<h2>Volumes Docker</h2>
+<p class="hint">Chaque volume devient <code>&lt;volume&gt;.tar.gz</code> (propriétaires numériques, droits, liens), écrit par l'agent. Avec le gel, les conteneurs en marche qui montent ces volumes sont mis en pause le temps de la lecture, puis toujours relancés : copie figée, comme après une coupure de courant, que les bases savent reprendre. Pour une base, <code>db_export</code> reste la voie conseillée (export propre, service non interrompu). Docker Engine en root seulement (ni Docker Desktop, ni rootless, ni Podman) ; socket, volumes et conteneurs vérifiés sur le poste par <code>kura-agent validate</code>.</p>
+<table>
+  <thead><tr><th>Préparation</th><th>Volumes</th><th>Arrêt des conteneurs</th></tr></thead>
+  <tbody>{{range .}}<tr><td>{{.ID}}{{if .Sealed}} <span class="muted">→ {{.Sent}} ({{.Sealed}})</span>{{end}}</td><td>{{range $i, $v := .Volumes}}{{if $i}}<br>{{end}}<code>{{$v}}</code>{{end}}</td><td>{{if .Pause}}gelés le temps de la lecture, {{.MaxPause}} au plus{{else}}aucun : copie non figée{{end}}</td></tr>{{end}}</tbody>
+</table>
+<p class="hint">Recharger un volume (en root sur le poste) : l'archive telle qu'à une date, conteneurs arrêtés, volume recréé, archive extraite avec ses propriétaires{{if (index . 0).Sealed}} (déchiffrée d'abord par le détenteur de la clé privée){{end}}.</p>
+{{with index . 0}}{{$v := index .Volumes 0}}<pre class="doc">sudo kura-agent restore /var/lib/kura/staging/{{.Sent}}/{{$v}}.tar.gz{{.Sealed}} --at 2026-10-20 --to /root/restauration
+docker compose stop
+docker volume rm {{$v}} &amp;&amp; docker volume create {{$v}}
+docker run --rm -v {{$v}}:/v -v /root/restauration:/b:ro alpine \
+  tar -xzpf /b/{{$v}}.tar.gz --numeric-owner -C /v
+docker compose start</pre>{{end}}
+{{end}}{{end}}
 <h2>Règles de la console</h2>
 <ul class="notes">
   <li><code>profile.bucket</code>, <code>endpoint</code> et <code>region</code> : ceux de ce bucket.</li>
@@ -39,6 +54,7 @@
   <li>Sous Linux : ni <code>pre_tasks</code>, ni <code>post_tasks</code>, ni <code>tray</code> (pas d'icône) ; la CLI AWS en snap n'est pas utilisable par le service.</li>
   <li>Le texte est conservé tel que saisi, commentaires compris : n'y écrire aucun secret, même en commentaire. Un seul document YAML (rien après <code>---</code>).</li>
   <li>Préparations (<code>prepare</code>, <code>tools</code>, <code>encryption</code>) : outils et sources en chemins complets du système du poste ; sous Windows, 7-Zip seulement pour <code>zip</code> ; SQL Server sous Windows seulement ; mot de passe d'une base en <code>credential:&lt;nom&gt;</code>, saisi à la création du paquet ; un job envoie <code>${STAGING:&lt;id&gt;}</code>, jamais le clair d'une préparation chiffrée.</li>
+  <li>Volumes Docker (<code>docker_volume</code>) : postes Linux seulement ; le gel (<code>pause: true</code>, défaut) donne au service le groupe <code>docker</code>, l'équivalent des droits root ; <code>pause: false</code> se passe de Docker mais la copie n'est pas figée.</li>
   <li>Clés publiques seulement : une clé privée gpg ou une identité age (<code>AGE-SECRET-KEY-…</code>) est refusée.</li>
   <li>Les sources, les comptes (<code>${PROFILE:…}</code>, <code>tray</code>), les outils (présence, version, droits) et les clés gpg sont vérifiés sur le poste, par <code>kura-agent install</code> et <code>validate</code>.</li>
 </ul>

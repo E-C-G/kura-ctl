@@ -156,10 +156,18 @@ jobs:
 #   - id: compta-chiffre
 #     type: age
 #     input: compta-db                  # export chiffré au fil de l'eau
+#   - id: appli                         # volumes Docker (Docker Engine en root)
+#     type: docker_volume
+#     volumes: [appli_db, appli_uploads]   # docker volume ls
+#     pause: true                       # défaut : conteneurs gelés pendant la lecture
+#     max_pause: 15m                    # défaut ; au-delà : dégel, préparation en échec
 # et dans jobs :
 #   - id: compta
 #     source: "${STAGING:compta-chiffre}"
 #     destination: BASES/COMPTA
+#   - id: appli
+#     source: "${STAGING:appli}"
+#     destination: DOCKER/APPLI
 
 notify:
   report:
@@ -203,6 +211,8 @@ type Checked struct {
 	// serveur de la base ; Encryptions : destinataires de chaque chiffrement.
 	Roles       []RoleHelp
 	Encryptions []Encryption
+	// Dockers : volumes de chaque préparation docker_volume, arrêt attendu, rechargement.
+	Dockers []Docker
 }
 
 // fakeEnv : la console ne connaît pas la machine du poste. Les comptes sont supposés
@@ -281,7 +291,8 @@ func CheckFor(text string, b store.Bucket, p store.Platform) (Checked, error) {
 			}
 		}
 	}
-	c := Checked{Config: cfg, KeyName: keyName, Warnings: cfg.Warnings(), Roles: roleHelps(cfg), Encryptions: encryptions(cfg)}
+	c := Checked{Config: cfg, KeyName: keyName, Warnings: append(cfg.Warnings(), dockerWarnings(cfg)...), Roles: roleHelps(cfg),
+		Encryptions: encryptions(cfg), Dockers: dockers(cfg)}
 	for _, ref := range cfg.CredentialRefs() {
 		if !pack.CredentialName.MatchString(ref.Name) {
 			add("%s : nom de secret %q invalide (minuscules, chiffres et '-', 40 caractères au plus)", ref.Field, ref.Name)
