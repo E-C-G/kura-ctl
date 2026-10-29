@@ -435,6 +435,12 @@ SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, PROCESS`, SQL Server `db_backupoperator`
 `CREATE ANY DATABASE` avec `verify`), sans mot de passe ; et, pour chaque chiffrement, les
 destinataires (empreintes gpg groupées comme dans Kleopatra, clés age) que chaque fichier aura.
 
+**Clés du chiffrement.** Le client fournit ses clés publiques et garde seul les clés privées :
+ni le poste, ni la console, ni l'éditeur n'en détiennent, et l'éditeur ne peut pas déchiffrer
+les sauvegardes chiffrées. La copie hors ligne (ou une seconde clé déclarée) est à la charge du
+client : perdre toutes ses clés privées rend les sauvegardes illisibles, sans recours. La console
+n'enregistre que les clés publiques, dans la configuration du poste.
+
 Le texte est conservé tel que saisi (commentaires compris), revérifié à chaque affichage et à
 chaque création de paquet.
 

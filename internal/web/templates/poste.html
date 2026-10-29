@@ -23,7 +23,7 @@
 {{end}}{{end}}
 {{with $d.Checked.Encryptions}}
 <h2>Chiffrement</h2>
-<p class="hint">Chaque fichier est lisible par chacune de ces clés publiques, et par elles seules. Les clés privées restent hors du poste : en garder deux (éditeur et client), dont une copie hors ligne. Les clés gpg sont vérifiées sur le poste par <code>kura-agent validate</code> (empreinte, expiration, révocation).</p>
+<p class="hint">Chaque fichier est lisible par chacune de ces clés publiques, et par elles seules. Les clés privées sont gardées par le client seul : ni le poste, ni la console, ni l'éditeur n'en détiennent, et personne d'autre ne peut déchiffrer. Le client en garde une copie hors ligne (ou déclare une seconde clé à lui) : perdre toutes ses clés privées rend les sauvegardes illisibles, sans recours. Les clés gpg sont vérifiées sur le poste par <code>kura-agent validate</code> (empreinte, expiration, révocation).</p>
 <table>
   <thead><tr><th>Préparation</th><th>Chiffre</th><th>Destinataires</th></tr></thead>
   <tbody>{{range .}}<tr><td>{{.ID}} <span class="muted">({{.Type}})</span></td><td>{{.From}}</td><td>{{range $i, $r := .Recipients}}{{if $i}}<br>{{end}}<code>{{$r}}</code>{{end}}{{if .Default}}<br><span class="muted">section encryption</span>{{end}}</td></tr>{{end}}</tbody>
