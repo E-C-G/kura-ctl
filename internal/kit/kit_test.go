@@ -27,6 +27,7 @@ type fakeGitHub struct {
 	zipCalls atomic.Int32
 	debCalls atomic.Int32
 	awsDown  bool
+	list     string // réponse de la liste des releases (JSON)
 }
 
 func agentZip(t *testing.T, ver string, exes map[string][]byte) []byte {
@@ -75,6 +76,8 @@ func newFake(t *testing.T, ver string) *fakeGitHub {
 				`{"name":%[4]q,"browser_download_url":"%[3]s/dl/deb-amd64"},{"name":%[5]q,"browser_download_url":"%[3]s/dl/deb-arm64"},`+
 				`{"name":"SHA256SUMS","browser_download_url":"%[3]s/dl/sums"}]}`,
 				g.tag, ver, base, DebName(ver, "amd64"), DebName(ver, "arm64"))
+		case r.URL.Path == "/releases" && r.URL.Query().Get("per_page") == "100":
+			io.WriteString(w, g.list)
 		case r.URL.Path == "/dl/zip":
 			g.zipCalls.Add(1)
 			w.Write(g.zip)
@@ -400,4 +403,66 @@ func TestPrepareBlocksRefreshWhileWriting(t *testing.T) {
 	}
 	release()
 	<-done
+}
+
+// Le kit livre la série de la console : une release d'une série plus récente est
+// laissée de côté au profit de la dernière de la série, correctif compris.
+func TestPrepareSeries(t *testing.T) {
+	g := newFake(t, "0.7.0")
+	g.tag = "v0.8.0" // dernière release publiée : série plus récente
+	asset := func(ver string) string {
+		return fmt.Sprintf(`{"name":"kura-agent_%[1]s_windows_amd64.zip","browser_download_url":"%[2]s/dl/zip"},`+
+			`{"name":"SHA256SUMS","browser_download_url":"%[2]s/dl/sums"}`, ver, g.srv.URL)
+	}
+	g.list = `[{"tag_name":"v0.8.0","assets":[` + asset("0.8.0") + `]},` +
+		`{"tag_name":"v0.7.3-rc1","prerelease":true,"assets":[` + asset("0.7.3-rc1") + `]},` +
+		`{"tag_name":"v0.7.2","draft":true,"assets":[` + asset("0.7.2") + `]},` +
+		`{"tag_name":"v0.7.0","assets":[` + asset("0.7.0") + `]}]`
+	src := g.source(t.TempDir(), time.Now())
+	src.Series = "0.7"
+	c, done, err := src.Prepare(context.Background(), Windows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+	if c.AgentVersion != "0.7.0" || c.NewerAgent != "0.8.0" {
+		t.Fatalf("version livrée %s, plus récente %q", c.AgentVersion, c.NewerAgent)
+	}
+	// Série plus ancienne que celle de la console : refusée.
+	g.tag = "v0.6.0"
+	src = g.source(t.TempDir(), time.Now())
+	src.Series = "0.7"
+	if _, _, err := src.Prepare(context.Background(), Windows); err == nil || !strings.Contains(err.Error(), "plus ancienne que la série") {
+		t.Fatalf("%v", err)
+	}
+	// Aucune release de la série.
+	g.tag, g.list = "v0.8.0", `[{"tag_name":"v0.8.0"}]`
+	src = g.source(t.TempDir(), time.Now())
+	src.Series = "0.7"
+	if _, _, err := src.Prepare(context.Background(), Windows); err == nil || !strings.Contains(err.Error(), "mettre à jour kura-ctl") {
+		t.Fatalf("%v", err)
+	}
+	// Tag inattendu (il nommerait le dossier du cache).
+	g.tag = "v0.7.0/../../x"
+	if _, _, err := g.source(t.TempDir(), time.Now()).Prepare(context.Background(), Windows); err == nil || !strings.Contains(err.Error(), "inattendu") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// AgentSeries suit la version de kura-agent importée par la console (go.mod).
+func TestAgentSeriesMatchesGoMod(t *testing.T) {
+	data, err := os.ReadFile("../../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "github.com/E-C-G/kura-agent" {
+			if got := series(strings.TrimPrefix(f[1], "v")); got != AgentSeries {
+				t.Fatalf("go.mod : kura-agent %s, AgentSeries %s", f[1], AgentSeries)
+			}
+			return
+		}
+	}
+	t.Fatal("kura-agent absent de go.mod")
 }

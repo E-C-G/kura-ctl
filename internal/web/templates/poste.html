@@ -5,12 +5,30 @@
   paquet d'installation complète ; {{if $d.Saved}}enregistré le {{datetime $d.UpdatedAt}} pour {{$d.Bucket.Platform.Label}}{{else}}pas encore enregistré{{end}}{{if $d.Template}} : modèle de départ ci-dessous pour {{$d.Platform.Label}}, à adapter (sources, horaire, comptes){{if $d.Saved}}, il ne remplace la configuration enregistrée qu'une fois vérifié et enregistré{{end}}{{end}}.</p>
 <p class="hint">Modèle de départ : {{range $i, $p := $d.Platforms}}{{if $i}} · {{end}}<a href="/buckets/{{$d.Bucket.Name}}/poste?systeme={{$p}}">{{$p.Label}}</a>{{end}}</p>
 {{with $d.Err}}<pre class="flash error doc">{{.}}</pre>{{end}}
+{{if not $d.Err}}{{with $d.Checked.Warnings}}<ul class="flash">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}{{end}}
 <form method="post" action="/buckets/{{$d.Bucket.Name}}/poste" autocomplete="off">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label>Système du poste<select name="platform">{{range $d.Platforms}}<option value="{{.}}"{{if eq . $d.Platform}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
   <label>config.yaml<textarea name="yaml" class="yaml" spellcheck="false" required>{{$d.YAML}}</textarea></label>
   <button>Vérifier et enregistrer</button>
 </form>
+{{if and (not $d.Err) (not $d.Template)}}{{with $d.Checked.Roles}}
+<h2>Rôles des bases</h2>
+<p class="hint">À créer sur le serveur de chaque base avant la première sauvegarde : un rôle dédié, en lecture seule. Aucun mot de passe ici : il se saisit à la création du paquet.</p>
+{{range .}}
+<h3>{{.ID}} <span class="muted">· {{.Engine}} · {{.Account}}</span></h3>
+<p class="hint">{{.Where}} :</p>
+<pre class="doc">{{.SQL}}</pre>
+{{with .Notes}}<ul class="notes">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+{{end}}{{end}}
+{{with $d.Checked.Encryptions}}
+<h2>Chiffrement</h2>
+<p class="hint">Chaque fichier est lisible par chacune de ces clés publiques, et par elles seules. Les clés privées restent hors du poste : en garder deux (éditeur et client), dont une copie hors ligne. Les clés gpg sont vérifiées sur le poste par <code>kura-agent validate</code> (empreinte, expiration, révocation).</p>
+<table>
+  <thead><tr><th>Préparation</th><th>Chiffre</th><th>Destinataires</th></tr></thead>
+  <tbody>{{range .}}<tr><td>{{.ID}} <span class="muted">({{.Type}})</span></td><td>{{.From}}</td><td>{{range $i, $r := .Recipients}}{{if $i}}<br>{{end}}<code>{{$r}}</code>{{end}}{{if .Default}}<br><span class="muted">section encryption</span>{{end}}</td></tr>{{end}}</tbody>
+</table>
+{{end}}{{end}}
 <h2>Règles de la console</h2>
 <ul class="notes">
   <li><code>profile.bucket</code>, <code>endpoint</code> et <code>region</code> : ceux de ce bucket.</li>
@@ -20,6 +38,8 @@
   <li>Sources : chemins complets du système du poste (<code>D:/Donnees</code>, <code>${PROFILE:alice}/Documents</code> ; <code>/home/alice/Documents</code> sous Linux).</li>
   <li>Sous Linux : ni <code>pre_tasks</code>, ni <code>post_tasks</code>, ni <code>tray</code> (pas d'icône) ; la CLI AWS en snap n'est pas utilisable par le service.</li>
   <li>Le texte est conservé tel que saisi, commentaires compris : n'y écrire aucun secret, même en commentaire. Un seul document YAML (rien après <code>---</code>).</li>
-  <li>Les sources et les comptes (<code>${PROFILE:…}</code>, <code>tray</code>) sont vérifiés sur le poste, à l'installation.</li>
+  <li>Préparations (<code>prepare</code>, <code>tools</code>, <code>encryption</code>) : outils et sources en chemins complets du système du poste ; sous Windows, 7-Zip seulement pour <code>zip</code> ; SQL Server sous Windows seulement ; mot de passe d'une base en <code>credential:&lt;nom&gt;</code>, saisi à la création du paquet ; un job envoie <code>${STAGING:&lt;id&gt;}</code>, jamais le clair d'une préparation chiffrée.</li>
+  <li>Clés publiques seulement : une clé privée gpg ou une identité age (<code>AGE-SECRET-KEY-…</code>) est refusée.</li>
+  <li>Les sources, les comptes (<code>${PROFILE:…}</code>, <code>tray</code>), les outils (présence, version, droits) et les clés gpg sont vérifiés sur le poste, par <code>kura-agent install</code> et <code>validate</code>.</li>
 </ul>
 {{end}}
