@@ -3,6 +3,7 @@ package poste
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/E-C-G/kura-agent/pkg/config"
 	"github.com/E-C-G/kura-ctl/internal/store"
@@ -211,6 +212,72 @@ func TestTemplatesHaveNoPreparation(t *testing.T) {
 		}
 		if len(c.Config.Prepare) != 0 || c.Config.Tools != (config.Tools{}) || len(c.Roles) != 0 {
 			t.Fatalf("%s : %+v", p, c.Config.Prepare)
+		}
+	}
+}
+
+const dockerPrepare = `
+encryption:
+  age:
+    recipients:
+      - age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+prepare:
+  - id: appli
+    type: docker_volume
+    volumes: [appli_db, appli_uploads]
+    max_pause: 10m
+  - id: appli-chiffre
+    type: age
+    input: appli
+  - id: certificats
+    type: docker_volume
+    volumes: [traefik_certs]
+    pause: false
+
+jobs:
+  - id: appli
+    source: "${STAGING:appli-chiffre}"
+    destination: DOCKER/APPLI
+  - id: certificats
+    source: "${STAGING:certificats}"
+    destination: DOCKER/CERTIFICATS
+`
+
+// Volumes Docker : acceptés sous Linux, avec l'arrêt attendu et les avertissements ;
+// refusés pour un poste Windows.
+func TestDockerVolumes(t *testing.T) {
+	linux := linuxBucket(store.PlatformLinuxARM64)
+	text := strings.Replace(Template(linux), "\njobs:\n", dockerPrepare, 1)
+	c, err := Check(text, linux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Dockers) != 2 {
+		t.Fatalf("%+v", c.Dockers)
+	}
+	a, s := c.Dockers[0], c.Dockers[1]
+	if a.ID != "appli" || !a.Pause || a.MaxPause != "10 min" || a.Sent != "appli-chiffre" || a.Sealed != ".age" || len(a.Volumes) != 2 {
+		t.Fatalf("appli : %+v", a)
+	}
+	if s.Pause || s.Sent != "certificats" || s.Sealed != "" {
+		t.Fatalf("certificats : %+v", s)
+	}
+	warn := strings.Join(c.Warnings, "\n")
+	if !strings.Contains(warn, "appli : conteneurs gelés") || !strings.Contains(warn, "groupe docker") ||
+		!strings.Contains(warn, "certificats : pause: false, copie non figée") {
+		t.Fatalf("avertissements :\n%s", warn)
+	}
+	if strings.Contains(warn, "certificats : conteneurs gelés") {
+		t.Fatal("gel annoncé sans pause")
+	}
+	win := strings.Replace(Template(bucket), "\njobs:\n", dockerPrepare, 1)
+	if _, err := Check(win, bucket); err == nil || !strings.Contains(err.Error(), "prepare[0] (appli) : docker_volume, volumes Docker sous Linux seulement") ||
+		!strings.Contains(err.Error(), "prepare[2] (certificats)") {
+		t.Fatalf("poste Windows : %v", err)
+	}
+	for d, want := range map[time.Duration]string{15 * time.Minute: "15 min", time.Hour: "1 h", 90 * time.Minute: "1 h 30 min", 90 * time.Second: "1m30s"} {
+		if got := minutes(d); got != want {
+			t.Errorf("%s : %q", d, got)
 		}
 	}
 }

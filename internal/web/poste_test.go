@@ -424,3 +424,35 @@ jobs:
 		t.Fatal("clair envoyé accepté")
 	}
 }
+
+// Volumes Docker d'un poste Ubuntu : la page du poste montre les volumes, l'arrêt attendu,
+// le coût du gel et la commande de rechargement.
+func TestPosteDockerVolumes(t *testing.T) {
+	hn, tok := adminHarness(t, nil)
+	b, _ := hn.st.Bucket(context.Background(), "acme-srv01")
+	text := strings.Replace(poste.TemplateFor(b, store.PlatformLinuxAMD64), "\njobs:\n", `
+prepare:
+  - id: appli
+    type: docker_volume
+    volumes: [appli_db]
+
+jobs:
+  - id: appli
+    source: "${STAGING:appli}"
+    destination: DOCKER/APPLI
+`, 1)
+	expectRedirect(t, hn.do("POST", "/buckets/acme-srv01/poste", url.Values{"csrf": {tok}, "yaml": {text}, "platform": {"linux-amd64"}}, nil), "/buckets/acme-srv01")
+	page := html.UnescapeString(hn.do("GET", "/buckets/acme-srv01/poste", nil, nil).Body.String())
+	for _, want := range []string{"Volumes Docker", "gelés le temps de la lecture, 15 min au plus", "groupe docker",
+		"sudo kura-agent restore /var/lib/kura/staging/appli/appli_db.tar.gz --at", "docker volume rm appli_db && docker volume create appli_db",
+		"tar -xzpf /b/appli_db.tar.gz --numeric-owner -C /v"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page du poste sans %q", want)
+		}
+	}
+	// Le même YAML pour un poste Windows : refusé.
+	win := strings.Replace(text, "source: /home/", "source: D:/", -1)
+	if rec := hn.do("POST", "/buckets/acme-srv01/poste", url.Values{"csrf": {tok}, "yaml": {win}, "platform": {"windows"}}, nil); !strings.Contains(html.UnescapeString(rec.Body.String()), "volumes Docker sous Linux seulement") {
+		t.Fatal("docker_volume accepté pour Windows")
+	}
+}

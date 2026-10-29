@@ -55,7 +55,7 @@ const (
 	// pkg/config et pkg/pack (go.mod). Le kit livre la dernière version publiée de cette
 	// série, correctifs compris, jamais une série plus récente : elle pourrait refuser
 	// une configuration que la console a acceptée (ou en lire le format autrement).
-	AgentSeries = "0.17"
+	AgentSeries = "0.18"
 
 	maxAWS      = 300 << 20
 	maxSig      = 64 << 10
