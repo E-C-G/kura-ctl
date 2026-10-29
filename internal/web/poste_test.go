@@ -407,7 +407,7 @@ jobs:
     source: "${STAGING:compta-chiffre}"
     destination: BASES/COMPTA
 `, 1)
-	expectRedirect(t, hn.savePoste(tok, text), "/buckets/acme-srv01")
+	expectRedirect(t, hn.do("POST", "/buckets/acme-srv01/poste", url.Values{"csrf": {tok}, "yaml": {text}}, nil), "/buckets/acme-srv01")
 	page := html.UnescapeString(hn.do("GET", "/buckets/acme-srv01/poste", nil, nil).Body.String())
 	for _, want := range []string{"Rôles des bases", `CREATE ROLE "kura_backup" LOGIN PASSWORD '…';`, "Chiffrement",
 		"age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p", "préparation compta-db"} {
