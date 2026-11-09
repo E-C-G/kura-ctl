@@ -14,7 +14,7 @@ require (
 	github.com/aws/smithy-go v1.28.7
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/zalando/go-keyring v0.2.8
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
